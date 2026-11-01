@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Chord-er</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%23ffcc4d'/><text x='16' y='23' font-size='20' text-anchor='middle' fill='%231a1400'>♪</text></svg>"
+    />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">Chord<span>-er</span></div>
+      <div id="song-title" class="song-title"></div>
+      <div class="meta">
+        <span id="key" class="pill" hidden></span>
+        <span id="tempo" class="pill" hidden></span>
+      </div>
+      <label class="button primary">
+        Open audio
+        <input id="file" type="file" accept=".mp3,audio/*" hidden />
+      </label>
+    </header>
+
+    <main>
+      <section id="dropzone" class="dropzone">
+        <div class="drop-card">
+          <div class="drop-icon">♪</div>
+          <h1>Drop an MP3 to see its chords</h1>
+          <p>or use <strong>Open audio</strong> above.</p>
+          <p class="hint">Analysis runs entirely in your browser — the audio never leaves this computer.</p>
+          <p id="drop-error" class="error" hidden></p>
+        </div>
+      </section>
+
+      <section id="player" class="player" hidden>
+        <div class="now-next">
+          <div class="now">
+            <div class="label">Now</div>
+            <div id="now-chord" class="chord-big">–</div>
+            <div id="bar-dots" class="bar-dots"></div>
+          </div>
+          <div class="next">
+            <div class="label">Next</div>
+            <div id="next-chord" class="chord-mid">–</div>
+            <div id="next-in" class="next-in"></div>
+          </div>
+        </div>
+
+        <div class="timeline-wrap">
+          <canvas id="timeline"></canvas>
+        </div>
+
+        <div class="transport">
+          <div class="group">
+            <button id="play" class="button primary round" title="Play / pause (Space)">▶</button>
+            <span id="time" class="time">0:00 / 0:00</span>
+          </div>
+
+          <div class="group controls">
+            <label>
+              Zoom
+              <input id="zoom" type="range" min="30" max="320" value="110" />
+            </label>
+            <label>
+              Speed
+              <select id="speed">
+                <option value="0.5">0.5×</option>
+                <option value="0.75">0.75×</option>
+                <option value="1" selected>1×</option>
+              </select>
+            </label>
+            <label>
+              Chords
+              <select id="vocabulary">
+                <option value="basic">Major / minor</option>
+                <option value="sevenths" selected>+ sevenths</option>
+                <option value="full">+ dim, sus4</option>
+              </select>
+            </label>
+            <label>
+              Smoothing
+              <input id="smoothing" type="range" min="0" max="10" step="0.5" value="5" />
+            </label>
+            <label>
+              Meter
+              <select id="meter">
+                <option value="3">3/4</option>
+                <option value="4" selected>4/4</option>
+              </select>
+            </label>
+            <div class="transpose">
+              <span>Transpose</span>
+              <button id="tr-down" class="button small">−</button>
+              <span id="tr-value" class="tr-value">0</span>
+              <button id="tr-up" class="button small">+</button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <div id="overlay" class="overlay" hidden>
+      <div class="progress-card">
+        <div id="stage" class="stage">Decoding audio…</div>
+        <div class="progress"><div id="progress-fill"></div></div>
+      </div>
+    </div>
+
+    <audio id="audio" preload="auto"></audio>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
