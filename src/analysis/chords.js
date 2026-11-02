@@ -1,5 +1,7 @@
 // Chord vocabulary, template matching, Viterbi smoothing, key detection and naming.
 
+import { barInfo } from './grid.js';
+
 export const QUALITIES = {
   maj: { suffix: '', intervals: [0, 4, 7], penalty: 0 },
   min: { suffix: 'm', intervals: [0, 3, 7], penalty: 0 },
@@ -17,7 +19,8 @@ export const VOCABULARIES = {
 };
 
 const KAPPA = 10; // emission scale: cosine similarity → log-likelihood
-const BASS_WEIGHT = 0.12; // bonus when the bass pitch class matches the root
+const BASS_WEIGHT = 0.12; // bonus when the bass note is the root (other chord tones: × BASS_TONE)
+const BASS_TONE = 0.7;
 const QUIET_DB = -40; // beats this far below the loud parts become N.C.
 const KEY_BIAS = 0.1; // bonus for chords whose notes all belong to the song's key
 
@@ -29,7 +32,7 @@ const MINOR_SCALE = [0, 2, 3, 5, 7, 8, 10, 11]; // natural minor plus the raised
 
 const mod12 = (x) => ((x % 12) + 12) % 12;
 
-export const beatInBar = (beat, phase, beatsPerBar) =>
+const beatInBar = (beat, phase, beatsPerBar) =>
   (((beat - phase) % beatsPerBar) + beatsPerBar) % beatsPerBar;
 
 // Template includes the first few harmonics of each chord tone, since the
@@ -55,34 +58,34 @@ function buildStates(vocabulary, key, keyBias) {
     for (let root = 0; root < 12; root++) {
       const inKey = intervals.every((iv) => scale.has(mod12(root + iv)));
       const bonus = inKey ? keyBias : 0;
-      states.push({ root, quality, penalty: penalty - bonus, template: chordTemplate(root, intervals) });
+      states.push({
+        root,
+        quality,
+        penalty: penalty - bonus,
+        template: chordTemplate(root, intervals),
+        // Root, third and fifth: a 7th only in the bass reads as a slash chord (Am/G, not Am7/G).
+        bassTones: intervals.slice(0, 3).map((iv) => mod12(root + iv)),
+      });
     }
   }
   states.push({ root: -1, quality: 'N' });
   return states;
 }
 
-function emissions(analysis, states) {
-  const { treble, bass, loudness } = analysis;
+function emissions(grid, states) {
+  const { treble, bassSalience, loudness } = grid;
   const n = loudness.length;
   const S = states.length;
   const em = new Float64Array(n * S);
   const chroma = new Float64Array(12);
   const bassNorm = new Float64Array(12);
+  const { peaks } = bassLevels(bassSalience, n);
 
   for (let i = 0; i < n; i++) {
-    let norm = 0;
-    let bassMax = 0;
-    for (let c = 0; c < 12; c++) {
-      chroma[c] = treble[i * 12 + c];
-      norm += chroma[c] * chroma[c];
-      bassMax = Math.max(bassMax, bass[i * 12 + c]);
-    }
-    norm = Math.sqrt(norm) || 1;
-    for (let c = 0; c < 12; c++) {
-      chroma[c] /= norm;
-      bassNorm[c] = bassMax > 0 ? bass[i * 12 + c] / bassMax : 0;
-    }
+    for (let c = 0; c < 12; c++) bassNorm[c] = peaks[i] > 0 ? bassSalience[i * 12 + c] / peaks[i] : 0;
+    for (let c = 0; c < 12; c++) chroma[c] = treble[i * 12 + c];
+    const norm = Math.hypot(...chroma) || 1;
+    for (let c = 0; c < 12; c++) chroma[c] /= norm;
     const quiet = loudness[i] < QUIET_DB;
 
     for (let s = 0; s < S; s++) {
@@ -91,13 +94,24 @@ function emissions(analysis, states) {
       if (st.root < 0) {
         score = quiet ? 2 : 0.2;
       } else {
-        score = -st.penalty + BASS_WEIGHT * bassNorm[st.root];
+        // The bass supports a chord when it plays one of its tones, the root most of all.
+        let bassSupport = 0;
+        for (const tone of st.bassTones) bassSupport = Math.max(bassSupport, bassNorm[tone] * (tone === st.root ? 1 : BASS_TONE));
+        score = -st.penalty + BASS_WEIGHT * bassSupport;
         for (let c = 0; c < 12; c++) score += chroma[c] * st.template[c];
       }
       em[i * S + s] = KAPPA * score;
     }
   }
   return em;
+}
+
+// Per-beat peak bass salience, and the song's typical level (90th percentile) to judge whether a
+// beat has a clear bass note.
+function bassLevels(salience, n) {
+  const peaks = Array.from({ length: n }, (_, i) => Math.max(...salience.subarray(i * 12, i * 12 + 12)));
+  const reference = [...peaks].sort((a, b) => a - b)[Math.floor(0.9 * (n - 1))] || 1;
+  return { peaks, reference };
 }
 
 // Viterbi with a uniform chord-change cost; O(n·S) thanks to the shared max.
@@ -142,20 +156,29 @@ function downbeatPhase(path, beatsPerBar) {
   return counts.indexOf(Math.max(...counts));
 }
 
-export function decodeChords(analysis, key, { vocabulary, smoothing, beatsPerBar, keyBias = KEY_BIAS }) {
-  const { beats, duration } = analysis;
+// `grid` holds the beats, beat-synchronous chroma and, when the beat tracker found them, the
+// downbeats. Returns the chord segments and the bars (see barInfo).
+export function decodeChords(grid, key, { vocabulary, smoothing, beatsPerBar, keyBias = KEY_BIAS }) {
+  const { beats, duration } = grid;
   const n = beats.length;
   const states = buildStates(vocabulary, key, keyBias);
   const S = states.length;
-  const em = emissions(analysis, states);
+  const em = emissions(grid, states);
   const cost = 0.3 * smoothing;
 
-  // First pass finds where bars start; second pass prefers changes on downbeats.
-  const phase = downbeatPhase(viterbi(em, n, S, () => cost), beatsPerBar);
+  // Without tracked downbeats, a first pass finds where bars start: where chords change most.
+  let downbeats = grid.downbeats;
+  if (!downbeats) {
+    const phase = downbeatPhase(viterbi(em, n, S, () => cost), beatsPerBar);
+    downbeats = Uint8Array.from(beats, (_, i) => beatInBar(i, phase, beatsPerBar) === 0);
+  }
+  const bars = barInfo(downbeats);
+  // Chord changes are cheapest on downbeats and dearest off the main beats of the bar.
   const path = viterbi(em, n, S, (i) => {
-    const pos = beatInBar(i, phase, beatsPerBar);
+    const pos = bars.pos[i];
+    const length = bars.length[i];
     if (pos === 0) return cost * 0.6;
-    if (beatsPerBar % 2 === 0 && pos === beatsPerBar / 2) return cost;
+    if (length % 2 === 0 && pos === length / 2) return cost;
     return cost * 1.5;
   });
 
@@ -166,7 +189,51 @@ export function decodeChords(analysis, key, { vocabulary, smoothing, beatsPerBar
     if (chords.length) chords[chords.length - 1].end = beats[i];
     chords.push({ start: beats[i], end: duration, startBeat: i, root, quality });
   }
-  return { chords, phase };
+  return { chords, bars };
+}
+
+const BASS_KAPPA = 6; // emission scale for bass notes
+const BASS_CHANGE = 1.5; // cost of a bass note change
+const BASS_PRESENT = 0.2; // a beat's bass counts above this share of the song's typical bass level
+
+// Bass pitch class per beat, or -1 where no clear bass sounds, from the beats' bass-note salience.
+// Smoothed with its own Viterbi pass: a bass may move under a held chord, but a single unclear
+// beat shouldn't flip it.
+export function decodeBassLine(grid) {
+  const { bassSalience: salience, beats } = grid;
+  const n = beats.length;
+  const S = 13; // 12 pitch classes + "no clear bass"
+  const { peaks, reference } = bassLevels(salience, n);
+  const em = new Float64Array(n * S);
+  for (let i = 0; i < n; i++) {
+    const peak = peaks[i] || 1;
+    for (let c = 0; c < 12; c++) em[i * S + c] = (BASS_KAPPA * salience[i * 12 + c]) / peak;
+    em[i * S + 12] = peaks[i] < BASS_PRESENT * reference ? 2 * BASS_KAPPA : 0.6 * BASS_KAPPA;
+  }
+  return Array.from(viterbi(em, n, S, () => BASS_CHANGE), (s) => (s === 12 ? -1 : s));
+}
+
+// Splits chord segments where the bass note changes and gives each piece its `bass` (-1 when it is
+// the root or unclear, so no slash is shown). Neighbouring pieces with the same bass stay merged.
+export function splitByBass(chords, bassLine, beats) {
+  const out = [];
+  chords.forEach((chord, k) => {
+    const endBeat = k + 1 < chords.length ? chords[k + 1].startBeat : beats.length;
+    const bassAt = (i) => (chord.root < 0 || bassLine[i] === chord.root ? -1 : bassLine[i]);
+    let runStart = chord.startBeat;
+    for (let i = chord.startBeat + 1; i <= endBeat; i++) {
+      if (i < endBeat && bassAt(i) === bassAt(runStart)) continue;
+      out.push({
+        ...chord,
+        start: beats[runStart],
+        end: i < endBeat ? beats[i] : chord.end,
+        startBeat: runStart,
+        bass: bassAt(runStart),
+      });
+      runStart = i;
+    }
+  });
+  return out;
 }
 
 const MAJOR_PROFILE = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
@@ -221,9 +288,12 @@ export function noteNames(key) {
   return [7, 2, 9, 4, 11, 6].includes(signature) ? SHARP_NAMES : FLAT_NAMES;
 }
 
-export function chordLabel(root, quality, key) {
+// "C", "Am7", or with a bass note other than the root, slash notation: "C/E".
+export function chordLabel(root, quality, key, bass = -1) {
   if (root < 0) return 'N.C.';
-  return noteNames(key)[root] + QUALITIES[quality].suffix;
+  const names = noteNames(key);
+  const label = names[root] + QUALITIES[quality].suffix;
+  return bass >= 0 && bass !== root ? `${label}/${names[bass]}` : label;
 }
 
 export const keyLabel = (key) => `${noteNames(key)[key.tonic]} ${key.mode}`;

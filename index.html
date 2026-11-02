@@ -14,13 +14,17 @@
       <div class="brand">Chord<span>-er</span></div>
       <div id="song-title" class="song-title"></div>
       <div class="meta">
-        <span id="stems" class="pill stems" hidden></span>
+        <span id="status" class="pill status" hidden></span>
         <label class="source" hidden title="Detect chords from the full mix, or from the harmony stems (bass + other instruments, without vocals and drums) once they are separated">
           Chords from
           <select id="source">
             <option value="mix">Full mix</option>
             <option value="harmony" disabled>Harmony (no vocals)</option>
           </select>
+        </label>
+        <label class="source" hidden title="Detect the bass note (from the bass stem, once separated) and show it as a slash chord, e.g. C/E, when it isn't the chord's root">
+          <input id="slash" type="checkbox" checked />
+          Slash chords
         </label>
         <span id="key" class="pill" hidden></span>
         <span id="tempo" class="pill" hidden></span>

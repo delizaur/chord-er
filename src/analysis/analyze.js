@@ -13,7 +13,7 @@ export function analyzeAudio(samples, sampleRate, onProgress = () => {}) {
   const tempoCandidates = detectTempo(samples, sampleRate);
 
   onProgress('Analyzing harmony', 0.3);
-  const { frameTimes, treble, bass, energy } = computeChroma(samples, sampleRate, (p) =>
+  const { frameTimes, treble, bass, bassSalience, energy } = computeChroma(samples, sampleRate, (p) =>
     onProgress('Analyzing harmony', 0.3 + 0.7 * p),
   );
 
@@ -23,6 +23,7 @@ export function analyzeAudio(samples, sampleRate, onProgress = () => {}) {
     frameTimes,
     treble,
     bass,
+    bassSalience,
     energy,
     peaks: computePeaks(samples, sampleRate),
     peaksPerSec: PEAKS_PER_SEC,

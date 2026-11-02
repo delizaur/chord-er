@@ -3,11 +3,12 @@ import { QUALITIES } from './analysis/chords.js';
 // Partial amplitudes of a soft, piano-like tone.
 const PARTIALS = [0, 1, 0.45, 0.25, 0.18, 0.1, 0.07, 0.04, 0.03];
 
-// Bass note in octave 2 plus a close-position voicing around middle C.
-export function chordVoicing(root, quality) {
+// Bass note in octave 2 (the root, or `bass` for a slash chord) plus a close-position voicing
+// around middle C.
+export function chordVoicing(root, quality, bass = -1) {
   if (root < 0) return [];
   const base = 60 + root > 66 ? 48 + root : 60 + root;
-  return [36 + root, ...QUALITIES[quality].intervals.map((iv) => base + iv)];
+  return [36 + (bass >= 0 ? bass : root), ...QUALITIES[quality].intervals.map((iv) => base + iv)];
 }
 
 const midiToHz = (m) => 440 * 2 ** ((m - 69) / 12);

@@ -78,8 +78,9 @@ function inverseSpectrogram(re, im) {
   return result;
 }
 
-// Runs the network on one SEGMENT-long stereo chunk; returns the sum of the wanted sources.
-async function separateSegment(run, left, right, wanted) {
+// Runs the network on one SEGMENT-long stereo chunk; returns, for each group of source indices,
+// the group's sum as [left, right].
+async function separateSegment(run, left, right, groups) {
   const mix = new Float32Array(2 * SEGMENT);
   mix.set(left, 0);
   mix.set(right, SEGMENT);
@@ -89,7 +90,7 @@ async function separateSegment(run, left, right, wanted) {
   const { freq, time } = await run(mix, mag, SEGMENT, BINS, FRAMES);
 
   const plane = BINS * FRAMES;
-  return [0, 1].map((ch) => {
+  return groups.map((wanted) => [0, 1].map((ch) => {
     // The iSTFT is linear, so the wanted sources' spectrograms are summed first.
     const re = new Float32Array(plane);
     const im = new Float32Array(plane);
@@ -106,16 +107,17 @@ async function separateSegment(run, left, right, wanted) {
       for (let i = 0; i < SEGMENT; i++) out[i] += time[base + i];
     }
     return out;
-  });
+  }));
 }
 
 /**
- * Separates a 44.1 kHz stereo signal and returns the sum of the `sources` (names from SOURCES)
- * as [left, right]. `run(mix, mag, ...)` runs the ONNX model and resolves to { freq, time }.
+ * Separates a 44.1 kHz stereo signal. `groups` lists groups of source names (from SOURCES), e.g.
+ * [['bass'], ['other']]; returns each group's sum as [left, right], from one pass of the network.
+ * `run(mix, mag, ...)` runs the ONNX model and resolves to { freq, time }.
  */
-export async function separate(left, right, sources, run, onProgress = () => {}) {
+export async function separate(left, right, groups, run, onProgress = () => {}) {
   const length = left.length;
-  const wanted = sources.map((s) => SOURCES.indexOf(s));
+  const indices = groups.map((sources) => sources.map((s) => SOURCES.indexOf(s)));
 
   // Like demucs.separate: normalize by the mono mix's mean and standard deviation.
   let mean = 0;
@@ -129,7 +131,7 @@ export async function separate(left, right, sources, run, onProgress = () => {})
   const weight = new Float32Array(SEGMENT);
   for (let i = 0; i < SEGMENT; i++) weight[i] = (i < SEGMENT / 2 ? i + 1 : SEGMENT - i) / (SEGMENT / 2);
 
-  const out = [new Float32Array(length), new Float32Array(length)];
+  const out = groups.map(() => [new Float32Array(length), new Float32Array(length)]);
   const total = new Float32Array(length);
   const stride = Math.floor((1 - OVERLAP) * SEGMENT);
   const offsets = [];
@@ -147,17 +149,17 @@ export async function separate(left, right, sources, run, onProgress = () => {})
       chunk[0][i] = (left[j] - mean) / std;
       chunk[1][i] = (right[j] - mean) / std;
     }
-    const result = await separateSegment(run, chunk[0], chunk[1], wanted);
-    for (let i = 0; i < chunkLength; i++) {
-      const w = weight[i];
-      out[0][offset + i] += w * result[0][trim + i];
-      out[1][offset + i] += w * result[1][trim + i];
-      total[offset + i] += w;
-    }
+    const result = await separateSegment(run, chunk[0], chunk[1], indices);
+    for (let i = 0; i < chunkLength; i++) total[offset + i] += weight[i];
+    result.forEach((stereo, g) => {
+      for (const ch of [0, 1]) {
+        for (let i = 0; i < chunkLength; i++) out[g][ch][offset + i] += weight[i] * stereo[ch][trim + i];
+      }
+    });
     onProgress((n + 1) / offsets.length);
   }
 
-  for (const channel of out) {
+  for (const channel of out.flat()) {
     for (let i = 0; i < length; i++) channel[i] = (channel[i] / total[i]) * std + mean;
   }
   return out;

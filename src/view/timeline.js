@@ -1,4 +1,4 @@
-import { beatInBar, indexAt } from '../analysis/chords.js';
+import { indexAt } from '../analysis/chords.js';
 
 const PLAYHEAD_RATIO = 0.25; // playhead position as a fraction of the width
 const RULER_HEIGHT = 22;
@@ -123,7 +123,7 @@ export class Timeline {
     ctx.fillRect(0, 0, W, H);
     if (!this.data) return;
 
-    const { duration, beats, phase, beatsPerBar, chords, peaks, peaksPerSec } = this.data;
+    const { duration, beats, bars, chords, peaks, peaksPerSec } = this.data;
     const t0 = this.xToTime(0);
     const t1 = this.xToTime(W);
     const chordTop = RULER_HEIGHT + 6;
@@ -142,7 +142,7 @@ export class Timeline {
     ctx.textAlign = 'left';
     for (let i = Math.max(0, indexAt(beats, t0)); i < beats.length && beats[i] <= t1; i++) {
       const x = Math.round(this.timeToX(beats[i])) + 0.5;
-      const isBar = beatInBar(i, phase, beatsPerBar) === 0;
+      const isBar = bars.pos[i] === 0;
       ctx.strokeStyle = isBar ? COLORS.bar : COLORS.beat;
       ctx.beginPath();
       ctx.moveTo(x, isBar ? 4 : chordTop);
@@ -150,7 +150,7 @@ export class Timeline {
       ctx.stroke();
       if (isBar) {
         ctx.fillStyle = COLORS.rulerText;
-        ctx.fillText(String(Math.floor((i - phase) / beatsPerBar) + 1), x + 5, RULER_HEIGHT / 2 + 2);
+        ctx.fillText(String(bars.number[i]), x + 5, RULER_HEIGHT / 2 + 2);
       }
     }
 
@@ -211,20 +211,28 @@ export class Timeline {
     const { ctx } = this;
     const pad = 8;
     const room = x1 - x0 - 2 * pad;
-    // Shrink the font to fit short chords, down to a legible minimum.
-    let size = Math.min(30, height * 0.42);
-    ctx.font = `700 ${size}px system-ui, sans-serif`;
-    let textWidth = ctx.measureText(chord.label).width;
-    if (textWidth > room) {
-      size = Math.max(10, (size * room) / textWidth);
+    // Shrink the font to fit short chords, down to a legible minimum; a slash chord that still
+    // doesn't fit shows just its bass note ("/E").
+    let label = chord.label;
+    let size;
+    let textWidth;
+    for (const candidate of label.includes('/') ? [label, label.slice(label.indexOf('/'))] : [label]) {
+      label = candidate;
+      size = Math.min(30, height * 0.42);
       ctx.font = `700 ${size}px system-ui, sans-serif`;
-      textWidth = ctx.measureText(chord.label).width;
+      textWidth = ctx.measureText(label).width;
+      if (textWidth > room) {
+        size = Math.max(10, (size * room) / textWidth);
+        ctx.font = `700 ${size}px system-ui, sans-serif`;
+        textWidth = ctx.measureText(label).width;
+      }
+      if (textWidth <= room) break;
     }
     const x = Math.min(Math.max(x0 + pad, pad), x1 - textWidth - pad);
     if (x < x0 + 2) return;
     ctx.fillStyle = chord.root < 0 ? 'rgba(255,255,255,0.4)' : COLORS.text;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
-    ctx.fillText(chord.label, x, top + height / 2);
+    ctx.fillText(label, x, top + height / 2);
   }
 }

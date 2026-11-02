@@ -2,16 +2,18 @@ import { FFT, hannWindow } from './fft.js';
 
 const FRAME_SIZE = 8192;
 const HOP_SIZE = 1024;
-const MIDI_LOW = 33; // A1
+const MIDI_LOW = 28; // E1, the lowest note of a 4-string bass
 const MIDI_HIGH = 95; // B6
-const BASS_HIGH = 57; // bass chroma: A1..G#3
+const BASS_LOW = 33; // bass chroma: A1..G#3
+const BASS_HIGH = 57;
 const TREBLE_LOW = 48; // treble chroma: C3..B6
 const SEMITONES = MIDI_HIGH - MIDI_LOW + 1;
 
 const midiToHz = (m) => 440 * 2 ** ((m - 69) / 12);
 const hzToMidi = (f) => 69 + 12 * Math.log2(f / 440);
 
-// Computes treble and bass chromagrams (12 bins per frame) plus frame energy.
+// Computes treble and bass chromagrams and bass-note salience (12 bins per frame each) plus
+// frame energy.
 export function computeChroma(samples, sampleRate, onProgress = () => {}) {
   const fft = new FFT(FRAME_SIZE);
   const window = hannWindow(FRAME_SIZE);
@@ -39,6 +41,7 @@ export function computeChroma(samples, sampleRate, onProgress = () => {}) {
   const tuning = estimateTuning(mags, frameCount, binCount, sampleRate);
   const { power, energy } = semitoneSpectrogram(mags, frameCount, binCount, sampleRate, tuning);
   onProgress(0.9);
+  const bassSalience = bassNoteSalience(power, frameCount);
   const pitch = enhance(power, frameCount);
 
   const treble = new Float32Array(frameCount * 12);
@@ -48,14 +51,39 @@ export function computeChroma(samples, sampleRate, onProgress = () => {}) {
       const midi = MIDI_LOW + s;
       const v = pitch[t * SEMITONES + s];
       if (midi >= TREBLE_LOW) treble[t * 12 + (midi % 12)] += v;
-      if (midi < BASS_HIGH) bass[t * 12 + (midi % 12)] += v;
+      if (midi >= BASS_LOW && midi < BASS_HIGH) bass[t * 12 + (midi % 12)] += v;
     }
   }
 
   const frameTimes = new Float64Array(frameCount);
   for (let t = 0; t < frameCount; t++) frameTimes[t] = (t * HOP_SIZE + FRAME_SIZE / 2) / sampleRate;
   onProgress(1);
-  return { frameTimes, treble, bass, energy, tuning };
+  return { frameTimes, treble, bass, bassSalience, energy, tuning };
+}
+
+// Bass-note candidates E1..E3 and the partials (semitone offset, weight) that vote for each.
+const BASS_NOTES = [28, 52];
+const BASS_PARTIALS = [[0, 1], [12, 0.7], [19, 0.45], [24, 0.3], [28, 0.2]];
+
+// How strongly each pitch class sounds as a bass note, per frame (subharmonic summation): every
+// candidate note collects its fundamental and overtones, so the fundamental of a bass line beats
+// its own octave, fifth and third partials. Each pitch class keeps its best octave.
+function bassNoteSalience(power, frameCount) {
+  const out = new Float32Array(frameCount * 12);
+  const amp = new Float64Array(SEMITONES);
+  for (let t = 0; t < frameCount; t++) {
+    for (let s = 0; s < SEMITONES; s++) amp[s] = Math.sqrt(power[t * SEMITONES + s]);
+    for (let m = BASS_NOTES[0]; m <= BASS_NOTES[1]; m++) {
+      let v = 0;
+      for (const [offset, weight] of BASS_PARTIALS) {
+        const s = m + offset - MIDI_LOW;
+        if (s < SEMITONES) v += weight * amp[s];
+      }
+      const o = t * 12 + (m % 12);
+      if (v > out[o]) out[o] = v;
+    }
+  }
+  return out;
 }
 
 // Global tuning offset in semitones (-0.5..0.5), from a magnitude-weighted
