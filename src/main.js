@@ -542,6 +542,18 @@ function playbackTime() {
 
 const formatTime = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 
+// Sets a chord name, shrinking its font when the name is too wide for its box. The line height
+// stays, so the panels keep their height.
+function showChord(el, label) {
+  el.style.fontSize = el.style.lineHeight = '';
+  el.textContent = label;
+  if (el.scrollWidth > el.clientWidth) {
+    const style = getComputedStyle(el);
+    el.style.lineHeight = style.lineHeight;
+    el.style.fontSize = `${(parseFloat(style.fontSize) * el.clientWidth) / el.scrollWidth}px`;
+  }
+}
+
 let shown = {};
 function updatePanel(t) {
   const { chords, bars } = song;
@@ -550,8 +562,8 @@ function updatePanel(t) {
   const next = chords[ci + 1];
 
   if (ci !== shown.chord) {
-    ui.now.textContent = ci >= 0 ? chords[ci].label : '–';
-    ui.next.textContent = next ? next.label : '–';
+    showChord(ui.now, ci >= 0 ? chords[ci].label : '–');
+    showChord(ui.next, next ? next.label : '–');
     shown.chord = ci;
   }
 
@@ -769,6 +781,11 @@ window.addEventListener('keydown', (e) => {
     e.preventDefault();
     seek(audio.currentTime + (e.code === 'ArrowLeft' ? -5 : 5));
   }
+});
+
+// Re-fit the chord names to the new box widths.
+window.addEventListener('resize', () => {
+  for (const el of [ui.now, ui.next]) showChord(el, el.textContent);
 });
 
 // Drag & drop anywhere on the page.

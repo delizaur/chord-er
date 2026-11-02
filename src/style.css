@@ -230,12 +230,18 @@ body.dragging .timeline-wrap {
   background: var(--panel);
 }
 
+.now,
+.next,
+.notes {
+  min-width: 0; /* fixed widths: a long chord name shrinks to fit instead of widening its box */
+}
+
 .now {
-  flex: 2;
+  flex: 2 1 0;
 }
 
 .next {
-  flex: 1;
+  flex: 1 1 0;
 }
 
 .notes-head {
@@ -270,16 +276,18 @@ body.dragging .timeline-wrap {
 }
 
 .notes {
-  flex: 1.4;
+  flex: 1.4 1 0;
   display: flex;
   flex-direction: column;
   gap: 8px;
-  min-width: 0;
 }
 
+/* Fills the panel without its drawing size (set from its displayed size) feeding back into the
+   layout, which made the panels grow whenever their width changed. */
 #note-graph {
-  flex: 1;
+  flex: 1 1 0;
   width: 100%;
+  height: 0;
   min-height: 110px;
 }
 
@@ -289,6 +297,11 @@ body.dragging .timeline-wrap {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.08em;
+}
+
+.chord-big,
+.chord-mid {
+  white-space: nowrap;
 }
 
 .chord-big {
