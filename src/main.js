@@ -1,5 +1,5 @@
 import './style.css';
-import { decodeToMono } from './audio.js';
+import { decodeToMono, decodeToStereo, resampleToMono } from './audio.js';
 import {
   beatInBar,
   chordLabel,
@@ -13,6 +13,7 @@ import {
   transposeRoot,
 } from './analysis/chords.js';
 import { beatSync, buildBeats } from './analysis/grid.js';
+import { MODEL_SAMPLE_RATE } from './separation/demucs.js';
 import { ChordSynth, Metronome, chordVoicing } from './synth.js';
 import { NoteGraph } from './view/noteGraph.js';
 import { Timeline } from './view/timeline.js';
@@ -26,6 +27,9 @@ const ui = {
   title: $('song-title'),
   key: $('key'),
   tempo: $('tempo'),
+  stems: $('stems'),
+  source: $('source'),
+  notesLabel: $('notes-label'),
   dropzone: $('dropzone'),
   dropError: $('drop-error'),
   player: $('player'),
@@ -54,6 +58,7 @@ const ui = {
 };
 
 const settings = {
+  source: 'mix', // chords from the full 'mix' or the separated 'harmony' (bass + other)
   tempo: '0:1', // "<candidate index>:<tempo multiplier>"
   halfBeat: false,
   vocabulary: 'sevenths',
@@ -61,11 +66,13 @@ const settings = {
   beatsPerBar: 4,
   transpose: 0,
 };
-let analysis = null; // worker output, independent of the settings above
+let analysis = null; // worker output, independent of the settings above; .harmony once separated
 let grid = null; // beat grid and beat-synchronous chroma for the current tempo settings
 let key = null;
 let song = null; // decoded chords with display labels
-let worker = null;
+let separator = null; // stem separation worker, kept alive so the model loads once
+let separating = false;
+let loadId = 0; // identifies the current song, so results for a replaced song are dropped
 let objectUrl = null;
 
 const volumeOf = (slider) => Number(slider.value) / 100;
@@ -84,14 +91,24 @@ const timeline = new Timeline($('timeline'), {
 
 async function loadFile(file) {
   if (!file) return;
+  const id = ++loadId;
   ui.dropError.hidden = true;
   showProgress('Decoding audio…', 0);
   audio.pause();
+  if (separating) {
+    // The worker is busy with the previous song; restart it (the model reloads from cache).
+    separator.terminate();
+    separator = null;
+    separating = false;
+  }
   try {
     const samples = await decodeToMono(await file.arrayBuffer(), ANALYSIS_SAMPLE_RATE);
-    analysis = await runAnalysis(samples);
+    analysis = await runAnalysis({ samples, sampleRate: ANALYSIS_SAMPLE_RATE }, showProgress);
     key = null;
     populateTempoOptions(analysis.tempoCandidates);
+    settings.source = ui.source.value = 'mix';
+    ui.source.querySelector('[value=harmony]').disabled = true;
+    ui.source.parentElement.hidden = false;
 
     if (objectUrl) URL.revokeObjectURL(objectUrl);
     objectUrl = URL.createObjectURL(file);
@@ -102,6 +119,7 @@ async function loadFile(file) {
     ui.player.hidden = false;
     refresh();
     seek(0);
+    separateHarmony(file, id);
   } catch (err) {
     console.error(err);
     ui.dropError.textContent = `Could not analyze “${file.name}”: ${err.message || err}`;
@@ -113,18 +131,65 @@ async function loadFile(file) {
   }
 }
 
-function runAnalysis(samples) {
-  worker?.terminate();
-  worker = new Worker(new URL('./analysis/worker.js', import.meta.url), { type: 'module' });
+// Sends one job to a worker and resolves with its result, reporting progress on the way.
+function runJob(worker, message, transfer, onProgress) {
   return new Promise((resolve, reject) => {
     worker.onmessage = ({ data }) => {
-      if (data.type === 'progress') showProgress(`${data.stage}…`, data.value);
-      else if (data.type === 'result') resolve(data.result);
+      if (data.type === 'progress') onProgress(data.stage, data.value);
+      else if (data.type === 'result') resolve(data);
       else reject(new Error(data.message));
     };
-    worker.onerror = (e) => reject(new Error(e.message || 'Analysis worker failed'));
-    worker.postMessage({ samples, sampleRate: ANALYSIS_SAMPLE_RATE }, [samples.buffer]);
+    worker.onerror = (e) => reject(new Error(e.message || 'Worker failed'));
+    worker.postMessage(message, transfer);
   });
+}
+
+async function runAnalysis(message, onProgress) {
+  const worker = new Worker(new URL('./analysis/worker.js', import.meta.url), { type: 'module' });
+  try {
+    return (await runJob(worker, message, [message.samples.buffer], onProgress)).result;
+  } finally {
+    worker.terminate();
+  }
+}
+
+// Separates the song's stems in the background, then analyzes the harmony (bass + other:
+// no vocals, no drums) and switches the chords to it. Tempo stays on the full mix.
+async function separateHarmony(file, id) {
+  showStemStatus('Preparing stem separation', 0);
+  try {
+    const stereo = await decodeToStereo(await file.arrayBuffer(), MODEL_SAMPLE_RATE);
+    if (id !== loadId) return;
+    separator ??= new Worker(new URL('./separation/worker.js', import.meta.url), { type: 'module' });
+    separating = true;
+    const { left, right } = await runJob(
+      separator,
+      { left: stereo[0], right: stereo[1], sources: ['bass', 'other'] },
+      stereo.map((c) => c.buffer),
+      showStemStatus,
+    );
+    separating = false;
+    if (id !== loadId) return;
+    const samples = await resampleToMono([left, right], MODEL_SAMPLE_RATE, ANALYSIS_SAMPLE_RATE);
+    const harmony = await runAnalysis({ samples, sampleRate: ANALYSIS_SAMPLE_RATE, mode: 'chroma' }, showStemStatus);
+    if (id !== loadId) return;
+    analysis.harmony = harmony;
+    ui.source.querySelector('[value=harmony]').disabled = false;
+    settings.source = ui.source.value = 'harmony';
+    key = null;
+    refresh();
+    showStemStatus(null);
+  } catch (err) {
+    if (id !== loadId) return;
+    console.error(err);
+    separating = false;
+    showStemStatus(`Stem separation failed: ${err.message || err}`);
+  }
+}
+
+function showStemStatus(stage, value) {
+  ui.stems.hidden = !stage;
+  if (stage) ui.stems.textContent = value == null ? stage : `${stage}… ${Math.round(value * 100)}%`;
 }
 
 function showProgress(stage, value) {
@@ -161,7 +226,8 @@ function refresh() {
   const [index, mult] = settings.tempo.split(':').map(Number);
   const candidate = tempoCandidates[index] ?? null;
   const beats = buildBeats(candidate, { mult, half: settings.halfBeat }, duration);
-  grid = { duration, beats, ...beatSync(beats, duration, analysis) };
+  const frames = settings.source === 'harmony' && analysis.harmony ? analysis.harmony : analysis;
+  grid = { duration, beats, ...beatSync(beats, duration, frames) };
   key ??= detectKey(grid);
 
   const { chords, phase } = decodeChords(grid, settings);
@@ -189,7 +255,8 @@ function refresh() {
     peaks: analysis.peaks,
     peaksPerSec: analysis.peaksPerSec,
   });
-  noteGraph.setData({ frameTimes: analysis.frameTimes, chroma: analysis.treble, names: noteNames(key) });
+  noteGraph.setData({ frameTimes: frames.frameTimes, chroma: frames.treble, names: noteNames(key) });
+  ui.notesLabel.textContent = frames === analysis ? 'Notes in the audio' : 'Notes in the harmony';
 
   ui.key.textContent = `Key: ${keyLabel(shownKey)}`;
   ui.tempo.textContent = `${Math.round(candidate ? candidate.bpm * mult : 120)} BPM`;
@@ -366,6 +433,11 @@ ui.zoom.addEventListener('input', () => timeline.setZoom(Number(ui.zoom.value)))
 ui.speed.addEventListener('change', () => {
   audio.playbackRate = Number(ui.speed.value);
   resetSchedule();
+});
+ui.source.addEventListener('change', () => {
+  settings.source = ui.source.value;
+  key = null;
+  refresh();
 });
 ui.tempoSelect.addEventListener('change', () => {
   settings.tempo = ui.tempoSelect.value;

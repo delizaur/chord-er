@@ -22,11 +22,43 @@ export class FFT {
 
   // Writes |X[k]| for k < out.length, given a real (already windowed) frame.
   magnitudes(input, out) {
-    const { size, re, im, rev, cos, sin } = this;
+    const { re, im } = this;
+    this.forward(input);
+    for (let k = 0; k < out.length; k++) out[k] = Math.sqrt(re[k] * re[k] + im[k] * im[k]);
+  }
+
+  // Forward transform of a real frame; the spectrum is left in this.re / this.im.
+  forward(input) {
+    const { size, re, im, rev } = this;
     for (let i = 0; i < size; i++) {
       re[rev[i]] = input[i];
       im[i] = 0;
     }
+    this.butterflies();
+  }
+
+  // Inverse transform of a Hermitian spectrum given for bins 0..size/2; writes the real
+  // signal (unscaled by 1/size, like most FFT libraries leave to the caller) to `out`.
+  inverseReal(specRe, specIm, out) {
+    const { size, re, im, rev } = this;
+    const half = size / 2;
+    // Conjugate the full spectrum, transform forward, conjugate again → inverse.
+    for (let k = 0; k < size; k++) {
+      const j = rev[k];
+      if (k <= half) {
+        re[j] = specRe[k];
+        im[j] = -specIm[k];
+      } else {
+        re[j] = specRe[size - k];
+        im[j] = specIm[size - k];
+      }
+    }
+    this.butterflies();
+    for (let i = 0; i < size; i++) out[i] = re[i];
+  }
+
+  butterflies() {
+    const { size, re, im, cos, sin } = this;
     for (let len = 2; len <= size; len <<= 1) {
       const half = len >> 1;
       const step = size / len;
@@ -43,7 +75,6 @@ export class FFT {
         }
       }
     }
-    for (let k = 0; k < out.length; k++) out[k] = Math.sqrt(re[k] * re[k] + im[k] * im[k]);
   }
 }
 

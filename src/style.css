@@ -68,6 +68,22 @@ body {
   gap: 8px;
 }
 
+.meta {
+  align-items: center;
+}
+
+.source {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.stems {
+  color: var(--accent);
+}
+
 .pill {
   padding: 3px 10px;
   border-radius: 999px;
