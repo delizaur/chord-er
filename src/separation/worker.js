@@ -1,10 +1,7 @@
 import * as ort from 'onnxruntime-web';
 import { configureOrt, createSession, loadModelFile } from '../models.js';
+import { SEPARATION_MODEL_URL } from '../modelFiles.js';
 import { separate } from './demucs.js';
-
-// HTDemucs v4 (MIT, Meta) exported to ONNX with the STFT outside the graph; pinned to a commit.
-const MODEL_URL =
-  'https://huggingface.co/Ghilda/htdemucs-onnx/resolve/850cd89461d0817276337061c29e6abceb86d75f/htdemucs.onnx';
 
 configureOrt(ort);
 
@@ -15,7 +12,7 @@ let ready = null;
 self.onmessage = async ({ data }) => {
   try {
     progress('Loading separation model', 0);
-    ready ??= loadModelFile(MODEL_URL, (p) => progress('Downloading separation model (one time, 166 MB)', p)).then(
+    ready ??= loadModelFile(SEPARATION_MODEL_URL, (p) => progress('Downloading separation model (one time, 166 MB)', p)).then(
       (model) => createSession(ort, model),
     );
     const { session, backend } = await ready;

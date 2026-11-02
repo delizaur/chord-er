@@ -15,7 +15,7 @@ npm run build    # static build in dist/ (serve it with `npm run preview`)
 ## Using it
 
 - Drop an audio file on the page or click **Open audio**.
-- Right after loading, the song is playable with a steady-tempo beat grid and chords from the full mix. Two steps then run in the background, with progress in the top bar:
+- Right after loading, the song is playable with a steady-tempo beat grid and chords from the full mix. Two AI steps then run in the background, with progress in the top bar. The first time, the app asks before downloading their models (82 + 166 MB). After **Not now** it keeps the basic analysis, and a **Download AI models** button in the top bar asks again.
   1. **Beat tracking** (a few seconds): the grid switches to beats from the Beat This! model, which follow tempo changes, and to the downbeats it found.
   2. **Stem separation** (tens of seconds): **Chords from** switches to the **harmony** (bass + other instruments, without vocals and drums), so the sung melody can't pull the detection off. Switch back to **Full mix** to compare. The bass stem also gives the bass line for slash chords.
 - **Timing** (top bar) sets when chords may change. **On beats** snaps changes to the beat grid, which helps on songs with a clear beat. **Free** lets chords change wherever the harmony and bass do, independent of the beats, which suits songs without drums or a steady pulse. **Auto** (the default) switches to free timing when the separated drums are (nearly) silent. Bar lines, beat dots and the click always follow the beat grid.

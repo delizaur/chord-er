@@ -16,6 +16,7 @@ import {
   transposeRoot,
 } from './analysis/chords.js';
 import { beatSync, buildBeats, timeSlots } from './analysis/grid.js';
+import { MODEL_CACHE, MODEL_URLS } from './modelFiles.js';
 import { MODEL_SAMPLE_RATE } from './separation/demucs.js';
 import { BassSynth, ChordSynth, Metronome, chordVoicing } from './synth.js';
 import { NoteGraph } from './view/noteGraph.js';
@@ -31,6 +32,8 @@ const ui = {
   key: $('key'),
   tempo: $('tempo'),
   status: $('status'),
+  enableModels: $('enable-models'),
+  modelDialog: $('model-dialog'),
   source: $('source'),
   slash: $('slash'),
   timing: $('timing'),
@@ -187,12 +190,71 @@ async function runModel(name, message, transfer) {
   }
 }
 
+const CONSENT_KEY = 'chord-er-models-consent';
+let consentPrompt = null; // the open dialog's answer, shared by everyone waiting on it
+let declined = false; // "Not now" this session: don't ask again on every song
+
+// True when the AI models may be used: they are already cached, the user agreed before, or the
+// user agrees now. Asks with a dialog before the first download; after "Not now", only when
+// `ask` is set (the user clicked the button).
+async function modelsAllowed(ask = !declined) {
+  try {
+    if (localStorage.getItem(CONSENT_KEY) === 'yes') return true;
+  } catch {
+    // storage blocked: just ask
+  }
+  if (await modelsCached()) return true;
+  if (!ask) return false;
+  if (!consentPrompt) {
+    consentPrompt = new Promise((resolve) =>
+      ui.modelDialog.addEventListener(
+        'close',
+        () => {
+          consentPrompt = null;
+          resolve(ui.modelDialog.returnValue);
+        },
+        { once: true },
+      ),
+    );
+    ui.modelDialog.showModal();
+  }
+  const answer = await consentPrompt;
+  declined = answer !== 'download';
+  if (declined) return false;
+  try {
+    localStorage.setItem(CONSENT_KEY, 'yes');
+  } catch {
+    // not remembered; the cached models skip the question next time anyway
+  }
+  return true;
+}
+
+async function modelsCached() {
+  try {
+    const cache = await caches.open(MODEL_CACHE);
+    const found = await Promise.all(MODEL_URLS.map((url) => cache.match(url)));
+    return found.every(Boolean);
+  } catch {
+    return false;
+  }
+}
+
 // Background improvements once the song is playable: Beat This! beats (seconds), then the
-// stem separation (tens of seconds). Each one switches the view over when it is ready.
-async function enhance(file, beatSamples, id) {
+// stem separation (tens of seconds). Each one switches the view over when it is ready. Without
+// the user's go-ahead for the model download, the basic analysis stays and a button offers it.
+async function enhance(file, beatSamples, id, ask) {
+  ui.enableModels.hidden = true;
+  if (!(await modelsAllowed(ask))) {
+    if (id === loadId) {
+      ui.enableModels.hidden = false;
+      ui.enableModels.onclick = () => enhance(file, beatSamples, id, true);
+    }
+    return;
+  }
+  if (id !== loadId) return;
   let failed = null;
   try {
-    await trackBeats(beatSamples, id);
+    await trackBeats(beatSamples.slice(), id);
   } catch (err) {
     if (id !== loadId) return;
     console.error(err);

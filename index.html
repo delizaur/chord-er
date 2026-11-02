@@ -17,6 +17,7 @@
       <div id="song-title" class="song-title"></div>
       <div class="meta">
         <span id="status" class="pill status" hidden></span>
+        <button id="enable-models" class="button small-text" hidden>Download AI models</button>
         <label class="source" hidden title="Detect chords from the full mix, or from the harmony stems (bass + other instruments, without vocals and drums) once they are separated">
           Chords from
           <select id="source">
@@ -166,6 +167,26 @@
         <div class="progress"><div id="progress-fill"></div></div>
       </div>
     </div>
+
+    <dialog id="model-dialog" class="dialog">
+      <form method="dialog">
+        <h2>Download the AI models?</h2>
+        <p>Chord-er can use two AI models for a better analysis:</p>
+        <ul>
+          <li><strong>Beat tracking</strong> (82 MB): follows tempo changes and finds the bars.</li>
+          <li><strong>Stem separation</strong> (166 MB): isolates the harmony and the bass, for more accurate chords and slash chords.</li>
+        </ul>
+        <p>
+          They are downloaded once from Hugging Face and then kept in your browser's cache. Your audio never
+          leaves your computer either way.
+        </p>
+        <p class="muted">Without them you get the basic analysis: a steady-tempo beat grid and chords from the full mix.</p>
+        <div class="dialog-buttons">
+          <button value="skip" class="button">Not now</button>
+          <button value="download" class="button primary" autofocus>Download (248 MB)</button>
+        </div>
+      </form>
+    </dialog>
 
     <audio id="audio" preload="auto"></audio>
     <script type="module" src="/src/main.js"></script>

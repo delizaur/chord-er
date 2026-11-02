@@ -3,6 +3,7 @@
 
 import ortMjsUrl from 'onnxruntime-web/ort-wasm-simd-threaded.jsep.mjs?url';
 import ortWasmUrl from 'onnxruntime-web/ort-wasm-simd-threaded.jsep.wasm?url';
+import { MODEL_CACHE } from './modelFiles.js';
 
 // Threads need cross-origin isolation (vite.config.js, or public/coi-serviceworker.js on static
 // hosts). ORT starts its threads from its own runtime script, so it is pointed at the standalone
@@ -12,13 +13,11 @@ export function configureOrt(ort) {
   ort.env.wasm.wasmPaths = { mjs: new URL(ortMjsUrl, self.location.href).href, wasm: new URL(ortWasmUrl, self.location.href).href };
 }
 
-const CACHE = 'chord-er-models-v1';
-
 // Cache Storage can be unavailable (private windows, storage errors); then files are simply
 // downloaded again next time.
 async function openCache() {
   try {
-    return await caches.open(CACHE);
+    return await caches.open(MODEL_CACHE);
   } catch (err) {
     console.warn('Model cache unavailable', err);
     return null;
