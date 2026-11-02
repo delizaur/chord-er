@@ -5,15 +5,17 @@ import {
   decodeBassLine,
   decodeChords,
   detectKey,
+  dropShortSlashes,
   indexAt,
   keyLabel,
   noteNames,
   QUALITIES,
+  refineChanges,
   splitByBass,
   transposeKey,
   transposeRoot,
 } from './analysis/chords.js';
-import { beatSync, buildBeats } from './analysis/grid.js';
+import { beatSync, buildBeats, timeSlots } from './analysis/grid.js';
 import { MODEL_SAMPLE_RATE } from './separation/demucs.js';
 import { BassSynth, ChordSynth, Metronome, chordVoicing } from './synth.js';
 import { NoteGraph } from './view/noteGraph.js';
@@ -31,6 +33,7 @@ const ui = {
   status: $('status'),
   source: $('source'),
   slash: $('slash'),
+  timing: $('timing'),
   notesLabel: $('notes-label'),
   dropzone: $('dropzone'),
   dropError: $('drop-error'),
@@ -64,6 +67,7 @@ const ui = {
 const settings = {
   source: 'mix', // chords from the full 'mix' or the separated 'harmony' (bass + other)
   slash: true, // split chords where the bass note changes and show it as C/E
+  timing: 'auto', // chord changes on the 'beats', 'free' (where the harmony changes), or 'auto'
   tempo: '0:1', // "<steady-tempo candidate index, or 'ai' for Beat This!>:<tempo multiplier>"
   halfBeat: false,
   vocabulary: 'sevenths',
@@ -73,12 +77,18 @@ const settings = {
   transpose: 0,
 };
 let analysis = null; // worker output, independent of the settings above; later also .tracked
-// (Beat This! beats), .harmony (chroma of bass + other) and .bassStem (analysis of the bass stem)
+// (Beat This! beats), .harmony (chroma of bass + other), .bassStem (analysis of the bass stem)
+// and .drumShare (the drums' share of the instrumental energy)
 let grid = null; // beat grid and beat-synchronous chroma for the current tempo settings
 let key = null;
 let song = null; // decoded chords with display labels
 // Model workers, kept alive so each model loads once; `busy` holds those mid-job.
 const workers = { beats: null, stems: null };
+// Written out literally so Vite bundles each worker for the production build.
+const createWorker = {
+  beats: () => new Worker(new URL('./beats/worker.js', import.meta.url), { type: 'module' }),
+  stems: () => new Worker(new URL('./separation/worker.js', import.meta.url), { type: 'module' }),
+};
 const busy = new Set();
 let loadId = 0; // identifies the current song, so results for a replaced song are dropped
 let objectUrl = null;
@@ -121,6 +131,7 @@ async function loadFile(file) {
     ui.source.parentElement.hidden = false;
     ui.slash.disabled = true;
     ui.slash.parentElement.hidden = false;
+    ui.timing.parentElement.hidden = false;
 
     if (objectUrl) URL.revokeObjectURL(objectUrl);
     objectUrl = URL.createObjectURL(file);
@@ -166,8 +177,8 @@ async function runAnalysis(message, onProgress) {
 }
 
 // Runs a job on one of the model workers, created on first use.
-async function runModel(name, url, message, transfer) {
-  workers[name] ??= new Worker(url, { type: 'module' });
+async function runModel(name, message, transfer) {
+  workers[name] ??= createWorker[name]();
   busy.add(name);
   try {
     return await runJob(workers[name], message, transfer, showStatus);
@@ -200,34 +211,31 @@ async function enhance(file, beatSamples, id) {
 // Beat This! follows tempo changes and finds the downbeats; it becomes the default grid.
 async function trackBeats(samples, id) {
   showStatus('Loading beat model', 0);
-  const { beats, downbeats } = await runModel(
-    'beats',
-    new URL('./beats/worker.js', import.meta.url),
-    { samples },
-    [samples.buffer],
-  );
+  const { beats, downbeats } = await runModel('beats', { samples }, [samples.buffer]);
   if (id !== loadId) return;
   analysis.tracked = { times: beats, downbeats };
   populateTempoOptions();
   refresh();
 }
 
-// Separates the bass and other stems, then analyzes the harmony (bass + other: no vocals, no
-// drums) for the chords and the bass stem alone for the bass line, and switches over to them.
-// Tempo stays on the full mix.
+// Separates the bass, other and drum stems, then analyzes the harmony (bass + other: no vocals,
+// no drums) for the chords and the bass stem alone for the bass line, and switches over to them.
+// The drums only tell whether the song has a beat to follow. Tempo stays on the full mix.
 async function separateHarmony(file, id) {
   showStatus('Preparing stem separation', 0);
   const stereo = await decodeToStereo(await file.arrayBuffer(), MODEL_SAMPLE_RATE);
   if (id !== loadId) return;
   const { stems } = await runModel(
     'stems',
-    new URL('./separation/worker.js', import.meta.url),
-    { left: stereo[0], right: stereo[1], groups: [['bass'], ['other']] },
+    { left: stereo[0], right: stereo[1], groups: [['bass'], ['other'], ['drums']] },
     stereo.map((c) => c.buffer),
   );
   if (id !== loadId) return;
-  const [bass, other] = stems;
+  const [bass, other, drums] = stems;
   const harmony = bass.map((channel, c) => channel.map((v, i) => v + other[c][i]));
+  const energy = (stem) => stem.reduce((sum, channel) => sum + channel.reduce((s, v) => s + v * v, 0), 0);
+  const drumEnergy = energy(drums);
+  analysis.drumShare = drumEnergy / (drumEnergy + energy(harmony) || 1);
   const analyze = async (stereoStem) =>
     runAnalysis(
       { samples: await resampleToMono(stereoStem, MODEL_SAMPLE_RATE, ANALYSIS_SAMPLE_RATE), sampleRate: ANALYSIS_SAMPLE_RATE, mode: 'chroma' },
@@ -322,14 +330,31 @@ function refresh() {
   grid = { duration, beats, downbeats, ...beatSync(beats, duration, frames, analysis.bassStem ?? frames) };
   key ??= detectKey(grid);
 
+  // The beat grid always gives the bars; the chords come from it too, or, with free timing, from
+  // a plain time grid so they change wherever the harmony does.
   let { chords, bars } = decodeChords(grid, key, settings);
-  // The bass line needs the bass stem: in the full mix the kick drum reads as bass notes.
-  const detectedBass = analysis.bassStem ? decodeBassLine(grid) : null;
-  if (settings.slash && detectedBass) chords = splitByBass(chords, detectedBass, beats);
+  const free = chordTimingIsFree();
+  const bassFrames = analysis.bassStem ?? frames;
+  let chordGrid = grid;
+  if (free) {
+    const slots = timeSlots(duration);
+    chordGrid = { duration, beats: slots, downbeats: null, uniform: true, ...beatSync(slots, duration, frames, bassFrames) };
+    ({ chords } = decodeChords(chordGrid, key, settings));
+  }
+  // Pieces of constant chord and bass note. The bass line needs the bass stem: in the full mix
+  // the kick drum reads as bass notes.
+  const detectedBass = analysis.bassStem ? decodeBassLine(chordGrid, settings.smoothing) : null;
+  let pieces = detectedBass ? splitByBass(chords, detectedBass, chordGrid.beats) : chords.map((c) => ({ ...c, bass: -1 }));
+  if (free) pieces = refineChanges(pieces, frames, bassFrames);
+  pieces = dropShortSlashes(pieces, settings.smoothing, 60 / medianBpm(beats));
+  // The bass synth plays each piece's bass note (the root where the bass is unclear).
+  song = { bass: pieces.map((p) => ({ start: p.start, pc: p.bass >= 0 ? p.bass : p.root })) };
+  if (!settings.slash) pieces = mergeSameChord(pieces);
+
   const shownKey = transposeKey(key, settings.transpose);
-  song = {
+  Object.assign(song, {
     bars,
-    chords: chords.map((c) => {
+    chords: pieces.map((c) => {
       const root = transposeRoot(c.root, settings.transpose);
       const bass = transposeRoot(c.bass ?? -1, settings.transpose);
       // The synth and note graph use the untransposed chord so it can be checked against the recording.
@@ -341,14 +366,8 @@ function refresh() {
         tones: c.root < 0 ? [] : QUALITIES[c.quality].intervals.map((iv) => (c.root + iv) % 12),
       };
     }),
-  };
-  // Bass pitch class per beat (untransposed, like the synth): the detected bass line, or the chord
-  // roots until the bass stem is separated. -1 where no bass sounds.
-  song.bassLine = new Int8Array(beats.length).fill(-1);
-  for (const [k, c] of chords.entries()) {
-    const end = k + 1 < chords.length ? chords[k + 1].startBeat : beats.length;
-    for (let i = c.startBeat; i < end; i++) song.bassLine[i] = detectedBass ? detectedBass[i] : c.root;
-  }
+  });
+  ui.timing.querySelector('[value=auto]').text = `Auto (${free ? 'free' : 'on beats'})`;
   timeline.setData({
     duration,
     beats,
@@ -369,6 +388,24 @@ function refresh() {
   ui.trValue.textContent = settings.transpose > 0 ? `+${settings.transpose}` : String(settings.transpose);
   shown = {};
   resetSchedule();
+}
+
+// Free chord timing when chosen, or automatically for songs (nearly) without drums, whose beat
+// grid is unreliable. Until the stems are separated, the drums' share is unknown: beats.
+function chordTimingIsFree() {
+  if (settings.timing !== 'auto') return settings.timing === 'free';
+  return analysis.drumShare !== undefined && analysis.drumShare < 0.05;
+}
+
+// Joins neighbouring pieces of the same chord (that differ only in bass note).
+function mergeSameChord(pieces) {
+  const out = [];
+  for (const p of pieces) {
+    const last = out[out.length - 1];
+    if (last && last.root === p.root && last.quality === p.quality) last.end = p.end;
+    else out.push({ ...p, bass: -1 });
+  }
+  return out;
 }
 
 // ---------- Playback ----------
@@ -419,9 +456,10 @@ function updatePanel(t) {
     shown.chord = ci;
   }
 
-  const beatsLeft = next && beat >= 0 ? next.startBeat - beat : null;
+  const beatsLeft = next && beat >= 0 ? Math.max(0, indexAt(grid.beats, next.start + 0.02) - beat) : null;
   if (beatsLeft !== shown.beatsLeft) {
-    ui.nextIn.textContent = beatsLeft == null ? '' : `in ${beatsLeft} beat${beatsLeft === 1 ? '' : 's'}`;
+    ui.nextIn.textContent =
+      beatsLeft == null ? '' : beatsLeft === 0 ? 'next' : `in ${beatsLeft} beat${beatsLeft === 1 ? '' : 's'}`;
     shown.beatsLeft = beatsLeft;
   }
 
@@ -474,9 +512,9 @@ function resetSchedule() {
   metronome.stopAll();
 }
 
-// Schedules clicks on every beat, chord strikes on each chord's first beat and on every downbeat
-// while it lasts, and bass notes whenever the bass line changes and on every downbeat, on the
-// AudioContext clock so they land exactly on the grid.
+// Schedules clicks on every beat, chord strikes where each chord starts and on every downbeat
+// while it lasts, and bass notes where each bass note starts and on every downbeat, on the
+// AudioContext clock so they land exactly on time.
 function schedule() {
   if (!audioCtx || audio.paused) {
     if (scheduledUntil !== null) resetSchedule();
@@ -490,22 +528,36 @@ function schedule() {
   const offset = [...clockOffsets].sort((a, b) => a - b)[clockOffsets.length >> 1];
 
   const { beats } = grid;
-  const { chords, bars, bassLine } = song;
+  const { chords, bars, bass } = song;
   const chordAt = (t) => chords[indexAt(chords, t, (c) => c.start)];
+  const bassAt = (t) => bass[indexAt(bass, t, (b) => b.start)]?.pc ?? -1;
   if (scheduledUntil === null) {
     synth.play(chordAt(songNow)?.voicing ?? [], audioCtx.currentTime);
-    bassSynth.play(bassLine[indexAt(beats, songNow)] ?? -1, audioCtx.currentTime);
+    bassSynth.play(bassAt(songNow), audioCtx.currentTime);
     scheduledUntil = songNow;
   }
   const until = songNow + LOOKAHEAD * rate;
+  const inWindow = (t) => t > scheduledUntil && t <= until;
+  const at = (t) => Math.max(audioCtx.currentTime, offset + t / rate);
+
+  // Song times of the chord and bass strikes in this window: starts, plus downbeat re-strikes
+  // (skipped right next to a start, where free-timing changes sit just off the beat).
+  const chordTimes = chords.filter((c) => inWindow(c.start)).map((c) => c.start);
+  const bassTimes = bass.filter((b) => inWindow(b.start)).map((b) => b.start);
+  const near = (times, t) => times.some((s) => Math.abs(s - t) < 0.08);
   for (let i = indexAt(beats, scheduledUntil) + 1; i < beats.length && beats[i] <= until; i++) {
-    const when = Math.max(audioCtx.currentTime, offset + beats[i] / rate);
     const downbeat = bars.pos[i] === 0;
-    metronome.click(when, downbeat);
-    const chord = chordAt(beats[i]);
-    if (chord && (chord.startBeat === i || downbeat)) synth.play(chord.voicing, when);
-    if (i === 0 || bassLine[i] !== bassLine[i - 1] || downbeat) bassSynth.play(bassLine[i], when);
+    metronome.click(at(beats[i]), downbeat);
+    if (!downbeat) continue;
+    if (!near(chordTimes, beats[i])) chordTimes.push(beats[i]);
+    if (!near(bassTimes, beats[i])) bassTimes.push(beats[i]);
   }
+  // In time order: each strike releases the notes before it.
+  for (const t of chordTimes.sort((a, b) => a - b)) {
+    const chord = chordAt(t + 1e-6);
+    if (chord) synth.play(chord.voicing, at(t));
+  }
+  for (const t of bassTimes.sort((a, b) => a - b)) bassSynth.play(bassAt(t + 1e-6), at(t));
   scheduledUntil = until;
 }
 
@@ -515,7 +567,7 @@ function frame() {
     timeline.setTime(t);
     updatePanel(t);
     schedule();
-    noteGraph.update(t, song.chords[indexAt(song.chords, t, (c) => c.start)]?.tones, song.bassLine[indexAt(grid.beats, t)] ?? -1);
+    noteGraph.update(t, song.chords[indexAt(song.chords, t, (c) => c.start)]?.tones, song.bass[indexAt(song.bass, t, (b) => b.start)]?.pc ?? -1);
   }
   requestAnimationFrame(frame);
 }
@@ -551,6 +603,10 @@ ui.zoom.addEventListener('input', () => timeline.setZoom(Number(ui.zoom.value)))
 ui.speed.addEventListener('change', () => {
   audio.playbackRate = Number(ui.speed.value);
   resetSchedule();
+});
+ui.timing.addEventListener('change', () => {
+  settings.timing = ui.timing.value;
+  refresh();
 });
 ui.slash.addEventListener('change', () => {
   settings.slash = ui.slash.checked;

@@ -77,6 +77,12 @@ function fromTrackedBeats({ times, downbeats }, { mult, half }, duration) {
   return { beats: Float64Array.from(beats), downbeats: flags && Uint8Array.from(flags) };
 }
 
+// Evenly spaced slot start times, for decoding chords independently of the beats (songs without
+// a reliable beat): chord changes then land wherever the harmony changes, to within a slot.
+export function timeSlots(duration, slot = 0.2) {
+  return Float64Array.from({ length: Math.max(1, Math.ceil(duration / slot)) }, (_, i) => i * slot);
+}
+
 // Position of each beat in its bar (0 = downbeat), the bar's length in beats and its number
 // (1-based; a pickup before the first downbeat is bar 0 or lower), from downbeat flags.
 export function barInfo(flags) {

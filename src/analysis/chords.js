@@ -157,7 +157,9 @@ function downbeatPhase(path, beatsPerBar) {
 }
 
 // `grid` holds the beats, beat-synchronous chroma and, when the beat tracker found them, the
-// downbeats. Returns the chord segments and the bars (see barInfo).
+// downbeats. Returns the chord segments and the bars (see barInfo). A grid with `uniform` set is
+// a plain time grid (see timeSlots): chords may change on any slot at the same cost, and it
+// has no bars.
 export function decodeChords(grid, key, { vocabulary, smoothing, beatsPerBar, keyBias = KEY_BIAS }) {
   const { beats, duration } = grid;
   const n = beats.length;
@@ -165,6 +167,11 @@ export function decodeChords(grid, key, { vocabulary, smoothing, beatsPerBar, ke
   const S = states.length;
   const em = emissions(grid, states);
   const cost = 0.3 * smoothing;
+
+  if (grid.uniform) {
+    const path = viterbi(em, n, S, () => cost * FREE_CHANGE_SCALE);
+    return { chords: segments(path, states, beats, duration), bars: null };
+  }
 
   // Without tracked downbeats, a first pass finds where bars start: where chords change most.
   let downbeats = grid.downbeats;
@@ -182,24 +189,32 @@ export function decodeChords(grid, key, { vocabulary, smoothing, beatsPerBar, ke
     return cost * 1.5;
   });
 
+  return { chords: segments(path, states, beats, duration), bars };
+}
+
+// Runs of equal states → chord segments with start/end times and the index of the first beat.
+function segments(path, states, beats, duration) {
   const chords = [];
-  for (let i = 0; i < n; i++) {
+  for (let i = 0; i < path.length; i++) {
     if (i > 0 && path[i] === path[i - 1]) continue;
     const { root, quality } = states[path[i]];
     if (chords.length) chords[chords.length - 1].end = beats[i];
     chords.push({ start: beats[i], end: duration, startBeat: i, root, quality });
   }
-  return { chords, bars };
+  return chords;
 }
 
 const BASS_KAPPA = 6; // emission scale for bass notes
-const BASS_CHANGE = 1.5; // cost of a bass note change
 const BASS_PRESENT = 0.2; // a beat's bass counts above this share of the song's typical bass level
+// Time slots (free timing) are shorter than beats; changes cost this much more on them, for about
+// the same smoothing per second.
+const FREE_CHANGE_SCALE = 2.5;
+const MIN_PIECE = 0.4; // seconds; shorter free-timing pieces join a neighbour
 
 // Bass pitch class per beat, or -1 where no clear bass sounds, from the beats' bass-note salience.
 // Smoothed with its own Viterbi pass: a bass may move under a held chord, but a single unclear
-// beat shouldn't flip it.
-export function decodeBassLine(grid) {
+// beat shouldn't flip it. A change costs as much as a chord change at the same `smoothing`.
+export function decodeBassLine(grid, smoothing) {
   const { bassSalience: salience, beats } = grid;
   const n = beats.length;
   const S = 13; // 12 pitch classes + "no clear bass"
@@ -210,7 +225,8 @@ export function decodeBassLine(grid) {
     for (let c = 0; c < 12; c++) em[i * S + c] = (BASS_KAPPA * salience[i * 12 + c]) / peak;
     em[i * S + 12] = peaks[i] < BASS_PRESENT * reference ? 2 * BASS_KAPPA : 0.6 * BASS_KAPPA;
   }
-  return Array.from(viterbi(em, n, S, () => BASS_CHANGE), (s) => (s === 12 ? -1 : s));
+  const change = 0.3 * smoothing * (grid.uniform ? FREE_CHANGE_SCALE : 1);
+  return Array.from(viterbi(em, n, S, () => change), (s) => (s === 12 ? -1 : s));
 }
 
 // Splits chord segments where the bass note changes and gives each piece its `bass` (-1 when it is
@@ -233,6 +249,98 @@ export function splitByBass(chords, bassLine, beats) {
       runStart = i;
     }
   });
+  return out;
+}
+
+// Moves each change of a free-timing (time-slot) chart to the frame within ±`window` seconds that
+// best separates the two sides: by chord template match on the frame chroma, or for a change of
+// bass note under the same chord, by bass salience. `frames` and `bassFrames` are frame-level
+// analyses (computeChroma).
+export function refineChanges(chords, frames, bassFrames, window = 0.3) {
+  const chordScore = (c, f) => {
+    if (c.root < 0) return 0.2;
+    const template = chordTemplate(c.root, QUALITIES[c.quality].intervals);
+    let dot = 0;
+    let norm = 0;
+    for (let k = 0; k < 12; k++) {
+      dot += frames.treble[f * 12 + k] * template[k];
+      norm += frames.treble[f * 12 + k] ** 2;
+    }
+    return dot / (Math.sqrt(norm) || 1);
+  };
+  const bassScore = (pc, f) => {
+    const v = bassFrames.bassSalience.subarray(f * 12, f * 12 + 12);
+    return pc < 0 ? 0 : v[pc] / (Math.max(...v) || 1);
+  };
+  const out = chords.map((c) => ({ ...c }));
+  for (let k = 1; k < out.length; k++) {
+    const [a, b] = [out[k - 1], out[k]];
+    const sameChord = a.root === b.root && a.quality === b.quality;
+    const score = sameChord
+      ? (c, f, times) => bassScore(c.bass >= 0 ? c.bass : c.root, Math.min(f, times.length - 1))
+      : (c, f) => chordScore(c, f);
+    const times = sameChord ? bassFrames.frameTimes : frames.frameTimes;
+    const lo = Math.max(a.start + 0.05, b.start - window);
+    const hi = Math.min(b.end - 0.05, b.start + window);
+    const from = indexAt(times, lo) + 1;
+    const to = indexAt(times, hi);
+    if (to <= from) continue;
+    // Best split: frames before it scored as `a`, from it on as `b`.
+    let best = -Infinity;
+    let split = b.start;
+    let left = 0;
+    let right = 0;
+    for (let f = from; f <= to; f++) right += score(b, f, times);
+    for (let f = from; f <= to; f++) {
+      if (left + right > best) {
+        best = left + right;
+        split = times[f];
+      }
+      left += score(a, f, times);
+      right -= score(b, f, times);
+    }
+    a.end = b.start = split;
+  }
+  return absorbShort(out, MIN_PIECE);
+}
+
+// Joins pieces shorter than `min` seconds to a neighbour, shortest first: to one with the same
+// chord when there is one (a passing bass note), otherwise to the longer neighbour.
+function absorbShort(pieces, min) {
+  const out = pieces.map((p) => ({ ...p }));
+  for (;;) {
+    let k = -1;
+    for (let i = 0; i < out.length; i++) {
+      const d = out[i].end - out[i].start;
+      if (d < min && (k < 0 || d < out[k].end - out[k].start)) k = i;
+    }
+    if (k < 0 || out.length < 2) return out;
+    const p = out[k];
+    const prev = out[k - 1];
+    const next = out[k + 1];
+    const same = (q) => q && q.root === p.root && q.quality === p.quality;
+    const length = (q) => (q ? q.end - q.start : -1);
+    const intoPrev = same(prev) || (!same(next) && length(prev) >= length(next));
+    if (intoPrev) prev.end = p.end;
+    else Object.assign(next, { start: p.start, startBeat: p.startBeat });
+    out.splice(k, 1);
+  }
+}
+
+// With more smoothing, short slash chords are left out: above 5, slash pieces up to
+// (smoothing − 5) / 2.5 beats long (1 beat at 7.5, 2 at 10) lose their slash and join the same
+// chord around them. `beatLength` is the typical beat length in seconds.
+export function dropShortSlashes(pieces, smoothing, beatLength) {
+  const minBeats = (smoothing - 5) / 2.5;
+  if (minBeats <= 0) return pieces;
+  const limit = minBeats * beatLength * 1.1; // beats vary a little in length
+  const out = [];
+  for (const piece of pieces) {
+    const p = piece.bass >= 0 && piece.end - piece.start <= limit ? { ...piece, bass: -1 } : piece;
+    const last = out[out.length - 1];
+    if (last && last.root === p.root && last.quality === p.quality && last.bass === p.bass) last.end = p.end;
+    else out.push({ ...p });
+  }
   return out;
 }
 

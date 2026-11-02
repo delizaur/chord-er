@@ -1,13 +1,12 @@
 import * as ort from 'onnxruntime-web';
-import { createSession, loadModelFile } from '../models.js';
+import { configureOrt, createSession, loadModelFile } from '../models.js';
 import { separate } from './demucs.js';
 
 // HTDemucs v4 (MIT, Meta) exported to ONNX with the STFT outside the graph; pinned to a commit.
 const MODEL_URL =
   'https://huggingface.co/Ghilda/htdemucs-onnx/resolve/850cd89461d0817276337061c29e6abceb86d75f/htdemucs.onnx';
 
-// Threads need cross-origin isolation (set up by vite.config.js).
-ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.min(8, navigator.hardwareConcurrency || 4) : 1;
+configureOrt(ort);
 
 const progress = (stage, value) => self.postMessage({ type: 'progress', stage, value });
 

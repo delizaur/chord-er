@@ -1,4 +1,16 @@
-// Fetches model files once and keeps them in the browser's Cache Storage. For use in workers.
+// Fetches model files once and keeps them in the browser's Cache Storage, and sets up ONNX
+// Runtime. For use in workers.
+
+import ortMjsUrl from 'onnxruntime-web/ort-wasm-simd-threaded.jsep.mjs?url';
+import ortWasmUrl from 'onnxruntime-web/ort-wasm-simd-threaded.jsep.wasm?url';
+
+// Threads need cross-origin isolation (vite.config.js, or public/coi-serviceworker.js on static
+// hosts). ORT starts its threads from its own runtime script, so it is pointed at the standalone
+// files: inside a bundled worker it would otherwise load the worker bundle instead, and hang.
+export function configureOrt(ort) {
+  ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.min(8, navigator.hardwareConcurrency || 4) : 1;
+  ort.env.wasm.wasmPaths = { mjs: new URL(ortMjsUrl, self.location.href).href, wasm: new URL(ortWasmUrl, self.location.href).href };
+}
 
 const CACHE = 'chord-er-models-v1';
 

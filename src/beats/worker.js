@@ -1,5 +1,5 @@
 import * as ort from 'onnxruntime-web';
-import { createSession, loadModelFile } from '../models.js';
+import { configureOrt, createSession, loadModelFile } from '../models.js';
 import { beatsFromLogits, logMel, predict } from './beatThis.js';
 
 // Beat This! final0 (MIT, CPJKU) exported to ONNX; frontend.json holds its STFT window and mel
@@ -8,7 +8,7 @@ const REPO = 'https://huggingface.co/aaatmy/beat-this-onnx/resolve/e2c0d4376fac8
 const MODEL_URL = `${REPO}/beat-this-final0.onnx`;
 const FRONTEND_URL = `${REPO}/frontend.json`;
 
-ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.min(8, navigator.hardwareConcurrency || 4) : 1;
+configureOrt(ort);
 
 const progress = (stage, value) => self.postMessage({ type: 'progress', stage, value });
 
