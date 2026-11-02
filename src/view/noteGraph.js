@@ -6,13 +6,13 @@ const EASING = 0.35; // per-frame approach toward the target level
 const COLORS = {
   bar: '#4a5470',
   chordTone: '#ffcc4d',
+  bass: '#4fc3f7',
   track: 'rgba(255,255,255,0.04)',
   label: 'rgba(255,255,255,0.5)',
-  chordLabel: '#ffcc4d',
 };
 
 // Live bar graph of the 12 pitch-class strengths at the playback position.
-// Chord tones of the current chord are highlighted.
+// Chord tones of the current chord are highlighted, and the current bass note in its own color.
 export class NoteGraph {
   constructor(canvas) {
     this.canvas = canvas;
@@ -20,6 +20,7 @@ export class NoteGraph {
     this.data = null;
     this.levels = new Float64Array(12);
     this.tones = [];
+    this.bass = -1;
     this.width = 0;
     this.height = 0;
     new ResizeObserver(() => this.resize()).observe(canvas);
@@ -49,7 +50,7 @@ export class NoteGraph {
     this.draw();
   }
 
-  update(t, tones = []) {
+  update(t, tones = [], bass = -1) {
     if (!this.data) return;
     const { frameTimes, chroma, floor } = this.data;
     const target = new Float64Array(12);
@@ -68,6 +69,7 @@ export class NoteGraph {
     for (let c = 0; c < 12; c++) this.levels[c] += (target[c] * scale - this.levels[c]) * EASING;
 
     this.tones = tones;
+    this.bass = bass;
     this.draw();
   }
 
@@ -87,15 +89,17 @@ export class NoteGraph {
     for (let c = 0; c < 12; c++) {
       const x = c * slot + (slot - barWidth) / 2;
       const isTone = this.tones.includes(c);
+      const isBass = c === this.bass;
+      const color = isBass ? COLORS.bass : isTone ? COLORS.chordTone : null;
       ctx.fillStyle = COLORS.track;
       ctx.fillRect(x, 0, barWidth, barArea);
       const h = Math.max(2, Math.min(1, this.levels[c]) * barArea);
-      ctx.fillStyle = isTone ? COLORS.chordTone : COLORS.bar;
+      ctx.fillStyle = color ?? COLORS.bar;
       ctx.beginPath();
       ctx.roundRect(x, barArea - h, barWidth, h, [3, 3, 0, 0]);
       ctx.fill();
 
-      ctx.fillStyle = isTone ? COLORS.chordLabel : COLORS.label;
+      ctx.fillStyle = color ?? COLORS.label;
       ctx.font = `${c === this.tones[0] ? 800 : 600} 11px system-ui, sans-serif`;
       ctx.fillText(this.data.names[c], c * slot + slot / 2, barArea + LABEL_HEIGHT / 2 + 1);
     }

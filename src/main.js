@@ -15,7 +15,7 @@ import {
 } from './analysis/chords.js';
 import { beatSync, buildBeats } from './analysis/grid.js';
 import { MODEL_SAMPLE_RATE } from './separation/demucs.js';
-import { ChordSynth, Metronome, chordVoicing } from './synth.js';
+import { BassSynth, ChordSynth, Metronome, chordVoicing } from './synth.js';
 import { NoteGraph } from './view/noteGraph.js';
 import { Timeline } from './view/timeline.js';
 
@@ -43,6 +43,7 @@ const ui = {
   time: $('time'),
   musicVolume: $('music-volume'),
   synthVolume: $('synth-volume'),
+  bassVolume: $('bass-volume'),
   clickVolume: $('click-volume'),
   zoom: $('zoom'),
   tempoSelect: $('tempo-select'),
@@ -84,6 +85,7 @@ let objectUrl = null;
 
 const volumeOf = (slider) => Number(slider.value) / 100;
 const synth = new ChordSynth(volumeOf(ui.synthVolume));
+const bassSynth = new BassSynth(volumeOf(ui.bassVolume));
 const metronome = new Metronome(volumeOf(ui.clickVolume));
 let audioCtx = null;
 let musicGain = null;
@@ -322,7 +324,8 @@ function refresh() {
 
   let { chords, bars } = decodeChords(grid, key, settings);
   // The bass line needs the bass stem: in the full mix the kick drum reads as bass notes.
-  if (settings.slash && analysis.bassStem) chords = splitByBass(chords, decodeBassLine(grid), beats);
+  const detectedBass = analysis.bassStem ? decodeBassLine(grid) : null;
+  if (settings.slash && detectedBass) chords = splitByBass(chords, detectedBass, beats);
   const shownKey = transposeKey(key, settings.transpose);
   song = {
     bars,
@@ -334,11 +337,18 @@ function refresh() {
         ...c,
         root,
         label: chordLabel(root, c.quality, shownKey, bass),
-        voicing: chordVoicing(c.root, c.quality, c.bass ?? -1),
+        voicing: chordVoicing(c.root, c.quality),
         tones: c.root < 0 ? [] : QUALITIES[c.quality].intervals.map((iv) => (c.root + iv) % 12),
       };
     }),
   };
+  // Bass pitch class per beat (untransposed, like the synth): the detected bass line, or the chord
+  // roots until the bass stem is separated. -1 where no bass sounds.
+  song.bassLine = new Int8Array(beats.length).fill(-1);
+  for (const [k, c] of chords.entries()) {
+    const end = k + 1 < chords.length ? chords[k + 1].startBeat : beats.length;
+    for (let i = c.startBeat; i < end; i++) song.bassLine[i] = detectedBass ? detectedBass[i] : c.root;
+  }
   timeline.setData({
     duration,
     beats,
@@ -446,6 +456,7 @@ function startAudio() {
     musicGain.gain.value = volumeOf(ui.musicVolume);
     audioCtx.createMediaElementSource(audio).connect(musicGain).connect(audioCtx.destination);
     synth.attach(audioCtx);
+    bassSynth.attach(audioCtx);
     metronome.attach(audioCtx);
   }
   if (audioCtx.state === 'suspended') audioCtx.resume();
@@ -459,11 +470,13 @@ function resetSchedule() {
   scheduledUntil = null;
   clockOffsets = [];
   synth.stopAll();
+  bassSynth.stopAll();
   metronome.stopAll();
 }
 
-// Schedules clicks on every beat, and chord strikes on each chord's first beat and on every
-// downbeat while it lasts, on the AudioContext clock so they land exactly on the grid.
+// Schedules clicks on every beat, chord strikes on each chord's first beat and on every downbeat
+// while it lasts, and bass notes whenever the bass line changes and on every downbeat, on the
+// AudioContext clock so they land exactly on the grid.
 function schedule() {
   if (!audioCtx || audio.paused) {
     if (scheduledUntil !== null) resetSchedule();
@@ -477,10 +490,11 @@ function schedule() {
   const offset = [...clockOffsets].sort((a, b) => a - b)[clockOffsets.length >> 1];
 
   const { beats } = grid;
-  const { chords, bars } = song;
+  const { chords, bars, bassLine } = song;
   const chordAt = (t) => chords[indexAt(chords, t, (c) => c.start)];
   if (scheduledUntil === null) {
     synth.play(chordAt(songNow)?.voicing ?? [], audioCtx.currentTime);
+    bassSynth.play(bassLine[indexAt(beats, songNow)] ?? -1, audioCtx.currentTime);
     scheduledUntil = songNow;
   }
   const until = songNow + LOOKAHEAD * rate;
@@ -490,6 +504,7 @@ function schedule() {
     metronome.click(when, downbeat);
     const chord = chordAt(beats[i]);
     if (chord && (chord.startBeat === i || downbeat)) synth.play(chord.voicing, when);
+    if (i === 0 || bassLine[i] !== bassLine[i - 1] || downbeat) bassSynth.play(bassLine[i], when);
   }
   scheduledUntil = until;
 }
@@ -500,7 +515,7 @@ function frame() {
     timeline.setTime(t);
     updatePanel(t);
     schedule();
-    noteGraph.update(t, song.chords[indexAt(song.chords, t, (c) => c.start)]?.tones);
+    noteGraph.update(t, song.chords[indexAt(song.chords, t, (c) => c.start)]?.tones, song.bassLine[indexAt(grid.beats, t)] ?? -1);
   }
   requestAnimationFrame(frame);
 }
@@ -519,6 +534,10 @@ ui.play.addEventListener('click', togglePlay);
 ui.musicVolume.addEventListener('input', () => {
   startAudio();
   musicGain.gain.setTargetAtTime(volumeOf(ui.musicVolume), audioCtx.currentTime, 0.02);
+});
+ui.bassVolume.addEventListener('input', () => {
+  startAudio();
+  bassSynth.setVolume(volumeOf(ui.bassVolume));
 });
 ui.synthVolume.addEventListener('input', () => {
   startAudio();

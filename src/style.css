@@ -6,6 +6,7 @@
   --text: #e8ebf2;
   --muted: #8b93a7;
   --accent: #ffcc4d;
+  --bass: #4fc3f7;
   --accent-ink: #1a1400;
   --error: #ff7a7a;
   color-scheme: dark;
@@ -235,6 +236,37 @@ body.dragging .timeline-wrap {
 
 .next {
   flex: 1;
+}
+
+.notes-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.legend {
+  display: flex;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.legend span::before {
+  content: '';
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 4px;
+  border-radius: 2px;
+}
+
+.legend .chord::before {
+  background: var(--accent);
+}
+
+.legend .bass::before {
+  background: var(--bass);
 }
 
 .notes {

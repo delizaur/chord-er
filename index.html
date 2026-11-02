@@ -59,7 +59,10 @@
             <div id="next-in" class="next-in"></div>
           </div>
           <div class="notes" title="How strongly each note sounds right now. Notes of the detected chord are highlighted.">
-            <div id="notes-label" class="label">Notes in the audio</div>
+            <div class="notes-head">
+              <div id="notes-label" class="label">Notes in the audio</div>
+              <div class="legend"><span class="chord">chord</span><span class="bass">bass</span></div>
+            </div>
             <canvas id="note-graph"></canvas>
           </div>
         </div>
@@ -80,6 +83,10 @@
               <label title="Volume of a synth playing the detected chords">
                 Chord synth
                 <input id="synth-volume" type="range" min="0" max="100" value="50" />
+              </label>
+              <label title="Volume of a synth bass playing the detected bass note (the chord roots until the stems are separated)">
+                Bass synth
+                <input id="bass-volume" type="range" min="0" max="100" value="50" />
               </label>
               <label title="Volume of a metronome click on every beat of the detected grid (higher on the first beat of each bar)">
                 Click

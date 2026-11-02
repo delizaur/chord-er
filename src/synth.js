@@ -3,12 +3,11 @@ import { QUALITIES } from './analysis/chords.js';
 // Partial amplitudes of a soft, piano-like tone.
 const PARTIALS = [0, 1, 0.45, 0.25, 0.18, 0.1, 0.07, 0.04, 0.03];
 
-// Bass note in octave 2 (the root, or `bass` for a slash chord) plus a close-position voicing
-// around middle C.
-export function chordVoicing(root, quality, bass = -1) {
+// Close-position voicing around middle C (the bass note is the BassSynth's part).
+export function chordVoicing(root, quality) {
   if (root < 0) return [];
   const base = 60 + root > 66 ? 48 + root : 60 + root;
-  return [36 + (bass >= 0 ? bass : root), ...QUALITIES[quality].intervals.map((iv) => base + iv)];
+  return QUALITIES[quality].intervals.map((iv) => base + iv);
 }
 
 const midiToHz = (m) => 440 * 2 ** ((m - 69) / 12);
@@ -106,6 +105,39 @@ export class Metronome extends ChordSynth {
     osc.connect(gain).connect(this.master);
     osc.start(when);
     osc.stop(when + 0.1);
+    this.track(osc, gain);
+  }
+}
+
+// Monophonic synth bass: a sawtooth through a low-pass filter with a plucked envelope, in the
+// octave E2–D#3 so it carries on small speakers too.
+export class BassSynth extends ChordSynth {
+  attach(ctx) {
+    this.ctx = ctx;
+    this.master = ctx.createGain();
+    this.master.gain.value = this.volume;
+    const lowpass = ctx.createBiquadFilter();
+    lowpass.type = 'lowpass';
+    lowpass.frequency.value = 650;
+    this.master.connect(lowpass).connect(ctx.destination);
+  }
+
+  // Plays pitch class `note` at `when`, releasing the previous note; -1 is silence.
+  play(note, when) {
+    if (!this.ctx) return;
+    release(this.voices, when);
+    if (this.volume === 0 || note < 0) return;
+    const osc = this.ctx.createOscillator();
+    osc.type = 'sawtooth';
+    osc.frequency.value = midiToHz(40 + ((note - 4 + 12) % 12));
+    const gain = this.ctx.createGain();
+    gain.gain.setValueAtTime(0, when);
+    gain.gain.linearRampToValueAtTime(0.3, when + 0.005);
+    gain.gain.setTargetAtTime(0.12, when + 0.005, 0.12); // pluck, then a soft sustain
+    gain.gain.setTargetAtTime(0, when + 0.6, 2);
+    osc.connect(gain).connect(this.master);
+    osc.start(when);
+    osc.stop(when + 10);
     this.track(osc, gain);
   }
 }
