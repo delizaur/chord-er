@@ -46,6 +46,10 @@
             <div id="next-chord" class="chord-mid">–</div>
             <div id="next-in" class="next-in"></div>
           </div>
+          <div class="notes" title="How strongly each note sounds right now. Notes of the detected chord are highlighted.">
+            <div class="label">Notes in the audio</div>
+            <canvas id="note-graph"></canvas>
+          </div>
         </div>
 
         <div class="timeline-wrap">
@@ -56,6 +60,28 @@
           <div class="group">
             <button id="play" class="button primary round" title="Play / pause (Space)">▶</button>
             <span id="time" class="time">0:00 / 0:00</span>
+            <div class="mix">
+              <label title="Volume of the song">
+                Music
+                <input id="music-volume" type="range" min="0" max="100" value="100" />
+              </label>
+              <label title="Volume of a synth playing the detected chords">
+                Chord synth
+                <input id="synth-volume" type="range" min="0" max="100" value="50" />
+              </label>
+              <label title="Volume of a metronome click on every beat of the detected grid (higher on the first beat of each bar)">
+                Click
+                <input id="click-volume" type="range" min="0" max="100" value="0" />
+              </label>
+              <label title="Beat grid tempo: the detected one, its double / half, or another candidate">
+                Tempo
+                <select id="tempo-select"></select>
+              </label>
+              <label title="Move the beat grid by half a beat (when the beats land between the hits)">
+                <input id="half-beat" type="checkbox" />
+                Shift ½ beat
+              </label>
+            </div>
           </div>
 
           <div class="group controls">

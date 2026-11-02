@@ -5,7 +5,7 @@ self.onmessage = ({ data }) => {
     const result = analyzeAudio(data.samples, data.sampleRate, (stage, value) =>
       self.postMessage({ type: 'progress', stage, value }),
     );
-    const transfer = ['beats', 'treble', 'bass', 'loudness', 'peaks'].map((k) => result[k].buffer);
+    const transfer = ['frameTimes', 'treble', 'bass', 'energy', 'peaks'].map((k) => result[k].buffer);
     self.postMessage({ type: 'result', result }, transfer);
   } catch (err) {
     self.postMessage({ type: 'error', message: err?.message ?? String(err) });

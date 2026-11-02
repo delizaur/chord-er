@@ -7,9 +7,14 @@ import {
   detectKey,
   indexAt,
   keyLabel,
+  noteNames,
+  QUALITIES,
   transposeKey,
   transposeRoot,
 } from './analysis/chords.js';
+import { beatSync, buildBeats } from './analysis/grid.js';
+import { ChordSynth, Metronome, chordVoicing } from './synth.js';
+import { NoteGraph } from './view/noteGraph.js';
 import { Timeline } from './view/timeline.js';
 
 const ANALYSIS_SAMPLE_RATE = 22050;
@@ -30,7 +35,12 @@ const ui = {
   barDots: $('bar-dots'),
   play: $('play'),
   time: $('time'),
+  musicVolume: $('music-volume'),
+  synthVolume: $('synth-volume'),
+  clickVolume: $('click-volume'),
   zoom: $('zoom'),
+  tempoSelect: $('tempo-select'),
+  halfBeat: $('half-beat'),
   speed: $('speed'),
   vocabulary: $('vocabulary'),
   smoothing: $('smoothing'),
@@ -43,13 +53,28 @@ const ui = {
   progress: $('progress-fill'),
 };
 
-const settings = { vocabulary: 'sevenths', smoothing: 5, beatsPerBar: 4, transpose: 0 };
+const settings = {
+  tempo: '0:1', // "<candidate index>:<tempo multiplier>"
+  halfBeat: false,
+  vocabulary: 'sevenths',
+  smoothing: 5,
+  beatsPerBar: 4,
+  transpose: 0,
+};
 let analysis = null; // worker output, independent of the settings above
+let grid = null; // beat grid and beat-synchronous chroma for the current tempo settings
 let key = null;
 let song = null; // decoded chords with display labels
 let worker = null;
 let objectUrl = null;
 
+const volumeOf = (slider) => Number(slider.value) / 100;
+const synth = new ChordSynth(volumeOf(ui.synthVolume));
+const metronome = new Metronome(volumeOf(ui.clickVolume));
+let audioCtx = null;
+let musicGain = null;
+
+const noteGraph = new NoteGraph($('note-graph'));
 const timeline = new Timeline($('timeline'), {
   onSeek: seek,
   onZoom: (pxPerSec) => (ui.zoom.value = pxPerSec),
@@ -65,7 +90,8 @@ async function loadFile(file) {
   try {
     const samples = await decodeToMono(await file.arrayBuffer(), ANALYSIS_SAMPLE_RATE);
     analysis = await runAnalysis(samples);
-    key = detectKey(analysis);
+    key = null;
+    populateTempoOptions(analysis.tempoCandidates);
 
     if (objectUrl) URL.revokeObjectURL(objectUrl);
     objectUrl = URL.createObjectURL(file);
@@ -107,36 +133,73 @@ function showProgress(stage, value) {
   ui.progress.style.width = `${Math.round(value * 100)}%`;
 }
 
-// Re-decodes chords from the cached analysis; cheap enough to run on every slider move.
+// The detected tempo, its double and half, and the other candidates, slowest first.
+function populateTempoOptions(candidates) {
+  const options = [];
+  const add = (i, mult) => {
+    const bpm = candidates[i].bpm * mult;
+    if (!options.some((o) => Math.abs(o.bpm / bpm - 1) < 0.03)) options.push({ value: `${i}:${mult}`, bpm });
+  };
+  if (candidates.length) {
+    [1, 2, 0.5].forEach((mult) => add(0, mult));
+    candidates.forEach((_, i) => add(i, 1));
+  }
+  options.sort((a, b) => a.bpm - b.bpm);
+  ui.tempoSelect.replaceChildren(
+    ...options.map(({ value, bpm }) => new Option(`${Math.round(bpm)} BPM${value === '0:1' ? ' (detected)' : ''}`, value)),
+  );
+  if (!options.length) ui.tempoSelect.append(new Option('120 BPM (no clear beat)', '0:1'));
+  settings.tempo = ui.tempoSelect.value = '0:1';
+  settings.halfBeat = ui.halfBeat.checked = false;
+}
+
+// Rebuilds the beat grid and re-decodes chords from the cached analysis; cheap enough to run
+// on every slider move.
 function refresh() {
   if (!analysis) return;
-  const { chords, phase } = decodeChords(analysis, settings);
+  const { duration, tempoCandidates } = analysis;
+  const [index, mult] = settings.tempo.split(':').map(Number);
+  const candidate = tempoCandidates[index] ?? null;
+  const beats = buildBeats(candidate, { mult, half: settings.halfBeat }, duration);
+  grid = { duration, beats, ...beatSync(beats, duration, analysis) };
+  key ??= detectKey(grid);
+
+  const { chords, phase } = decodeChords(grid, settings);
   const shownKey = transposeKey(key, settings.transpose);
   song = {
     phase,
     chords: chords.map((c) => {
       const root = transposeRoot(c.root, settings.transpose);
-      return { ...c, root, label: chordLabel(root, c.quality, shownKey) };
+      // The synth and note graph use the untransposed chord so it can be checked against the recording.
+      return {
+        ...c,
+        root,
+        label: chordLabel(root, c.quality, shownKey),
+        voicing: chordVoicing(c.root, c.quality),
+        tones: c.root < 0 ? [] : QUALITIES[c.quality].intervals.map((iv) => (c.root + iv) % 12),
+      };
     }),
   };
   timeline.setData({
-    duration: analysis.duration,
-    beats: analysis.beats,
+    duration,
+    beats,
     phase,
     beatsPerBar: settings.beatsPerBar,
     chords: song.chords,
     peaks: analysis.peaks,
     peaksPerSec: analysis.peaksPerSec,
   });
+  noteGraph.setData({ frameTimes: analysis.frameTimes, chroma: analysis.treble, names: noteNames(key) });
 
   ui.key.textContent = `Key: ${keyLabel(shownKey)}`;
-  ui.tempo.textContent = `${Math.round(analysis.tempo)} BPM`;
+  ui.tempo.textContent = `${Math.round(candidate ? candidate.bpm * mult : 120)} BPM`;
   ui.key.hidden = ui.tempo.hidden = false;
   ui.trValue.textContent = settings.transpose > 0 ? `+${settings.transpose}` : String(settings.transpose);
   ui.barDots.replaceChildren(
     ...Array.from({ length: settings.beatsPerBar }, () => document.createElement('span')),
   );
   shown = {};
+  resetSchedule();
 }
 
 // ---------- Playback ----------
@@ -146,11 +209,13 @@ function seek(t) {
   const clamped = Math.max(0, Math.min(analysis.duration, t));
   audio.currentTime = clamped;
   lastAudioTime = -1;
+  resetSchedule();
   timeline.setTime(clamped);
 }
 
 function togglePlay() {
   if (!analysis) return;
+  startAudio();
   if (audio.paused) audio.play();
   else audio.pause();
 }
@@ -176,7 +241,7 @@ let shown = {};
 function updatePanel(t) {
   const { chords, phase } = song;
   const ci = indexAt(chords, t, (c) => c.start);
-  const beat = indexAt(analysis.beats, t);
+  const beat = indexAt(grid.beats, t);
   const next = chords[ci + 1];
 
   if (ci !== shown.chord) {
@@ -204,11 +269,72 @@ function updatePanel(t) {
   }
 }
 
+// ---------- Scheduled sounds: chord synth and metronome ----------
+
+// One AudioContext for the song, the synth and the clicks, so they share the output latency.
+// It must be created from a user gesture.
+function startAudio() {
+  if (!audioCtx) {
+    audioCtx = new AudioContext({ latencyHint: 'interactive' });
+    musicGain = audioCtx.createGain();
+    musicGain.gain.value = volumeOf(ui.musicVolume);
+    audioCtx.createMediaElementSource(audio).connect(musicGain).connect(audioCtx.destination);
+    synth.attach(audioCtx);
+    metronome.attach(audioCtx);
+  }
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+}
+
+const LOOKAHEAD = 0.15; // seconds of song scheduled ahead of the playback position
+let scheduledUntil = null; // song time up to which beats are scheduled; null = (re)start
+let clockOffsets = []; // recent samples of (context time − song time / rate)
+
+function resetSchedule() {
+  scheduledUntil = null;
+  clockOffsets = [];
+  synth.stopAll();
+  metronome.stopAll();
+}
+
+// Schedules clicks on every beat, and chord strikes on each chord's first beat and on every
+// downbeat while it lasts, on the AudioContext clock so they land exactly on the grid.
+function schedule() {
+  if (!audioCtx || audio.paused) {
+    if (scheduledUntil !== null) resetSchedule();
+    return;
+  }
+  const rate = audio.playbackRate;
+  const songNow = audio.currentTime;
+  // audio.currentTime is jittery; the median of recent samples gives a stable clock mapping.
+  clockOffsets.push(audioCtx.currentTime - songNow / rate);
+  if (clockOffsets.length > 60) clockOffsets.shift();
+  const offset = [...clockOffsets].sort((a, b) => a - b)[clockOffsets.length >> 1];
+
+  const { beats } = grid;
+  const { chords, phase } = song;
+  const chordAt = (t) => chords[indexAt(chords, t, (c) => c.start)];
+  if (scheduledUntil === null) {
+    synth.play(chordAt(songNow)?.voicing ?? [], audioCtx.currentTime);
+    scheduledUntil = songNow;
+  }
+  const until = songNow + LOOKAHEAD * rate;
+  for (let i = indexAt(beats, scheduledUntil) + 1; i < beats.length && beats[i] <= until; i++) {
+    const when = Math.max(audioCtx.currentTime, offset + beats[i] / rate);
+    const downbeat = beatInBar(i, phase, settings.beatsPerBar) === 0;
+    metronome.click(when, downbeat);
+    const chord = chordAt(beats[i]);
+    if (chord && (chord.startBeat === i || downbeat)) synth.play(chord.voicing, when);
+  }
+  scheduledUntil = until;
+}
+
 function frame() {
   if (song) {
     const t = playbackTime();
     timeline.setTime(t);
     updatePanel(t);
+    schedule();
+    noteGraph.update(t, song.chords[indexAt(song.chords, t, (c) => c.start)]?.tones);
   }
   requestAnimationFrame(frame);
 }
@@ -224,8 +350,31 @@ ui.file.addEventListener('change', () => {
   ui.file.value = '';
 });
 ui.play.addEventListener('click', togglePlay);
+ui.musicVolume.addEventListener('input', () => {
+  startAudio();
+  musicGain.gain.setTargetAtTime(volumeOf(ui.musicVolume), audioCtx.currentTime, 0.02);
+});
+ui.synthVolume.addEventListener('input', () => {
+  startAudio();
+  synth.setVolume(volumeOf(ui.synthVolume));
+});
+ui.clickVolume.addEventListener('input', () => {
+  startAudio();
+  metronome.setVolume(volumeOf(ui.clickVolume));
+});
 ui.zoom.addEventListener('input', () => timeline.setZoom(Number(ui.zoom.value)));
-ui.speed.addEventListener('change', () => (audio.playbackRate = Number(ui.speed.value)));
+ui.speed.addEventListener('change', () => {
+  audio.playbackRate = Number(ui.speed.value);
+  resetSchedule();
+});
+ui.tempoSelect.addEventListener('change', () => {
+  settings.tempo = ui.tempoSelect.value;
+  refresh();
+});
+ui.halfBeat.addEventListener('change', () => {
+  settings.halfBeat = ui.halfBeat.checked;
+  refresh();
+});
 ui.vocabulary.addEventListener('change', () => {
   settings.vocabulary = ui.vocabulary.value;
   refresh();

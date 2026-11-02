@@ -203,7 +203,7 @@ const FLAT_NAMES = ['C', 'Db', 'D', 'Eb', 'E', 'F', 'Gb', 'G', 'Ab', 'A', 'Bb', 
 const NATURAL_NAMES = ['C', 'Db', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B'];
 
 // Spell notes by the key signature: sharp keys use sharps, flat keys use flats.
-function noteNames(key) {
+export function noteNames(key) {
   const signature = key.mode === 'minor' ? mod12(key.tonic + 3) : key.tonic;
   if (signature === 0) return NATURAL_NAMES;
   return [7, 2, 9, 4, 11, 6].includes(signature) ? SHARP_NAMES : FLAT_NAMES;

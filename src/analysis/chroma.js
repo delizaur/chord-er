@@ -1,7 +1,7 @@
 import { FFT, hannWindow } from './fft.js';
 
 const FRAME_SIZE = 8192;
-const HOP_SIZE = 2048;
+const HOP_SIZE = 1024;
 const MIDI_LOW = 33; // A1
 const MIDI_HIGH = 95; // B6
 const BASS_HIGH = 57; // bass chroma: A1..G#3

@@ -209,11 +209,17 @@ export class Timeline {
   // The label sticks to the left edge while its chord scrolls out of view.
   drawLabel(chord, x0, x1, top, height) {
     const { ctx } = this;
-    const width = x1 - x0;
-    const size = Math.min(30, height * 0.42, Math.max(11, width * 0.45));
+    const pad = 8;
+    const room = x1 - x0 - 2 * pad;
+    // Shrink the font to fit short chords, down to a legible minimum.
+    let size = Math.min(30, height * 0.42);
     ctx.font = `700 ${size}px system-ui, sans-serif`;
-    const textWidth = ctx.measureText(chord.label).width;
-    const pad = 10;
+    let textWidth = ctx.measureText(chord.label).width;
+    if (textWidth > room) {
+      size = Math.max(10, (size * room) / textWidth);
+      ctx.font = `700 ${size}px system-ui, sans-serif`;
+      textWidth = ctx.measureText(chord.label).width;
+    }
     const x = Math.min(Math.max(x0 + pad, pad), x1 - textWidth - pad);
     if (x < x0 + 2) return;
     ctx.fillStyle = chord.root < 0 ? 'rgba(255,255,255,0.4)' : COLORS.text;
