@@ -48,6 +48,7 @@ const ui = {
   speed: $('speed'),
   vocabulary: $('vocabulary'),
   smoothing: $('smoothing'),
+  keyBias: $('key-bias'),
   meter: $('meter'),
   trDown: $('tr-down'),
   trUp: $('tr-up'),
@@ -63,6 +64,7 @@ const settings = {
   halfBeat: false,
   vocabulary: 'sevenths',
   smoothing: 5,
+  keyBias: 0.1, // score bonus for chords that fit the key (slider value × 0.02)
   beatsPerBar: 4,
   transpose: 0,
 };
@@ -230,7 +232,7 @@ function refresh() {
   grid = { duration, beats, ...beatSync(beats, duration, frames) };
   key ??= detectKey(grid);
 
-  const { chords, phase } = decodeChords(grid, settings);
+  const { chords, phase } = decodeChords(grid, key, settings);
   const shownKey = transposeKey(key, settings.transpose);
   song = {
     phase,
@@ -453,6 +455,10 @@ ui.vocabulary.addEventListener('change', () => {
 });
 ui.smoothing.addEventListener('input', () => {
   settings.smoothing = Number(ui.smoothing.value);
+  refresh();
+});
+ui.keyBias.addEventListener('input', () => {
+  settings.keyBias = Number(ui.keyBias.value) * 0.02;
   refresh();
 });
 ui.meter.addEventListener('change', () => {

@@ -19,8 +19,13 @@ export const VOCABULARIES = {
 const KAPPA = 10; // emission scale: cosine similarity → log-likelihood
 const BASS_WEIGHT = 0.12; // bonus when the bass pitch class matches the root
 const QUIET_DB = -40; // beats this far below the loud parts become N.C.
+const KEY_BIAS = 0.1; // bonus for chords whose notes all belong to the song's key
+
 const HARMONICS = [0, 12, 19, 24, 28, 31]; // semitone offsets of partials 1..6
 const HARMONIC_DECAY = 0.6;
+
+const MAJOR_SCALE = [0, 2, 4, 5, 7, 9, 11];
+const MINOR_SCALE = [0, 2, 3, 5, 7, 8, 10, 11]; // natural minor plus the raised 7th (for V)
 
 const mod12 = (x) => ((x % 12) + 12) % 12;
 
@@ -38,12 +43,19 @@ function chordTemplate(root, intervals) {
   return t.map((v) => v / norm);
 }
 
-function buildStates(vocabulary) {
+// Chords that fit the key get a small bonus. It only decides when the audio is ambiguous, as
+// with power chords (no third), where E minor vs E major is implied by the key, not played.
+function buildStates(vocabulary, key, keyBias) {
+  const scale = new Set(
+    (key.mode === 'minor' ? MINOR_SCALE : MAJOR_SCALE).map((d) => mod12(key.tonic + d)),
+  );
   const states = [];
   for (const quality of VOCABULARIES[vocabulary]) {
     const { intervals, penalty } = QUALITIES[quality];
     for (let root = 0; root < 12; root++) {
-      states.push({ root, quality, penalty, template: chordTemplate(root, intervals) });
+      const inKey = intervals.every((iv) => scale.has(mod12(root + iv)));
+      const bonus = inKey ? keyBias : 0;
+      states.push({ root, quality, penalty: penalty - bonus, template: chordTemplate(root, intervals) });
     }
   }
   states.push({ root: -1, quality: 'N' });
@@ -130,10 +142,10 @@ function downbeatPhase(path, beatsPerBar) {
   return counts.indexOf(Math.max(...counts));
 }
 
-export function decodeChords(analysis, { vocabulary, smoothing, beatsPerBar }) {
+export function decodeChords(analysis, key, { vocabulary, smoothing, beatsPerBar, keyBias = KEY_BIAS }) {
   const { beats, duration } = analysis;
   const n = beats.length;
-  const states = buildStates(vocabulary);
+  const states = buildStates(vocabulary, key, keyBias);
   const S = states.length;
   const em = emissions(analysis, states);
   const cost = 0.3 * smoothing;

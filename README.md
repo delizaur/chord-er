@@ -20,6 +20,7 @@ npm run build    # static build in dist/ (serve it with `npm run preview`)
 - **Tempo** picks the beat grid: the detected tempo, its double or half, or another candidate. Turn on **Shift ½ beat** if the beats fall between the hits.
 - **Chords** sets the chord vocabulary (major/minor only, add sevenths, or add dim/sus4).
 - **Smoothing** sets how readily chords change. Raise it if the chart flickers, lower it if quick changes are missed.
+- **Key bias** pulls chords toward the song's detected key. This matters for power chords and other voicings without a third: the 5th overtone of a low E sounds like a G#, so without the bias an E5 in an E minor song reads as E major. Lower it for songs that really use chords from outside the key (secondary dominants, borrowed chords).
 - **Meter** and **Transpose** take effect immediately; there's no re-analysis.
 
 ## How it works
@@ -30,7 +31,7 @@ npm run build    # static build in dist/ (serve it with `npm run preview`)
    - **Chroma** (`chroma.js`): an 8192-point STFT (46 ms hop) with global tuning estimation, then a semitone spectrogram (A1–B6). Next come log compression, a temporal median filter (to suppress drums), whitening across pitch, and finally folding into treble and bass chroma.
 3. **Beat grid** (`grid.js`, main thread): beats are built from the chosen tempo candidate (with the ×2 / ½ and half-beat-shift options), and the chroma (of the mix or of the harmony stems) is averaged per beat.
 4. **Stem separation** (`src/separation/`, in a Web Worker): [HTDemucs](https://github.com/facebookresearch/demucs) v4 (Meta, MIT license) splits the song into drums, bass, other and vocals. It uses the [Ghilda/htdemucs-onnx](https://huggingface.co/Ghilda/htdemucs-onnx) export (166 MB, MIT, pinned to a commit) and runs with onnxruntime-web on WebGPU, falling back to WebAssembly. The model graph leaves out the STFT, so `demucs.js` reproduces the reference padding, STFT/iSTFT and overlapping 7.8 s segments in JS. Bass + other are resampled and analyzed for chroma like the full mix. Tempo detection keeps using the full mix, since it needs the drums.
-5. **Decode chords** (`chords.js`, main thread, cheap): each beat's chroma is compared with chord templates that include harmonics, with a bonus when the bass note matches the root. A Viterbi pass then smooths the result, and chord changes cost less on downbeats. Downbeats are inferred from where chord changes cluster. The key comes from Krumhansl–Schmuckler and sets sharp vs. flat spelling.
+5. **Decode chords** (`chords.js`, main thread, cheap): each beat's chroma is compared with chord templates that include harmonics, with a bonus when the bass note matches the root. Chords whose notes all fit the detected key (natural minor plus the raised 7th, for minor keys) get a small bonus. A Viterbi pass then smooths the result, and chord changes cost less on downbeats. Downbeats are inferred from where chord changes cluster. The key comes from Krumhansl–Schmuckler and sets sharp vs. flat spelling.
 6. **View** (`src/view/timeline.js`): a canvas timeline with a fixed playhead, bar and beat grid, chord blocks colored by the circle of fifths, and a waveform.
 
 ## Notes
