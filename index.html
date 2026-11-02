@@ -91,6 +91,12 @@
                 Music
                 <input id="music-volume" type="range" min="0" max="100" value="100" />
               </label>
+              <span id="stem-mix" class="mix" hidden title="Volume of each separated stem. The song briefly reloads after a change.">
+                <label>Vocals <input data-stem="vocals" type="range" min="0" max="100" value="100" /></label>
+                <label>Drums <input data-stem="drums" type="range" min="0" max="100" value="100" /></label>
+                <label>Bass <input data-stem="bass" type="range" min="0" max="100" value="100" /></label>
+                <label>Other <input data-stem="other" type="range" min="0" max="100" value="100" /></label>
+              </span>
               <label title="Volume of a synth playing the detected chords">
                 Chord synth
                 <input id="synth-volume" type="range" min="0" max="100" value="50" />

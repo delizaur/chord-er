@@ -18,6 +18,7 @@ import {
 import { beatSync, buildBeats, timeSlots } from './analysis/grid.js';
 import { MODEL_CACHE, MODEL_URLS } from './modelFiles.js';
 import { MODEL_SAMPLE_RATE } from './separation/demucs.js';
+import { mixToWav, toInt16 } from './stemMix.js';
 import { BassSynth, ChordSynth, Metronome, chordVoicing } from './synth.js';
 import { NoteGraph } from './view/noteGraph.js';
 import { Timeline } from './view/timeline.js';
@@ -48,6 +49,8 @@ const ui = {
   play: $('play'),
   time: $('time'),
   musicVolume: $('music-volume'),
+  stemMix: $('stem-mix'),
+  stemVolumes: [...document.querySelectorAll('[data-stem]')],
   synthVolume: $('synth-volume'),
   bassVolume: $('bass-volume'),
   clickVolume: $('click-volume'),
@@ -82,6 +85,8 @@ const settings = {
 let analysis = null; // worker output, independent of the settings above; later also .tracked
 // (Beat This! beats), .harmony (chroma of bass + other), .bassStem (analysis of the bass stem)
 // and .drumShare (the drums' share of the instrumental energy)
+let stems = null; // the separated stems as 16-bit [left, right], in STEM_NAMES order
+const STEM_NAMES = ['vocals', 'drums', 'bass', 'other'];
 let grid = null; // beat grid and beat-synchronous chroma for the current tempo settings
 let key = null;
 let song = null; // decoded chords with display labels
@@ -94,7 +99,8 @@ const createWorker = {
 };
 const busy = new Set();
 let loadId = 0; // identifies the current song, so results for a replaced song are dropped
-let objectUrl = null;
+let objectUrl = null; // the original file
+let mixUrl = null; // the current stem mix, when any stem volume is below 100
 
 const volumeOf = (slider) => Number(slider.value) / 100;
 const synth = new ChordSynth(volumeOf(ui.synthVolume));
@@ -135,9 +141,14 @@ async function loadFile(file) {
     ui.slash.disabled = true;
     ui.slash.parentElement.hidden = false;
     ui.timing.parentElement.hidden = false;
+    stems = null;
+    ui.stemMix.hidden = true;
+    for (const slider of ui.stemVolumes) slider.value = 100;
 
     if (objectUrl) URL.revokeObjectURL(objectUrl);
+    if (mixUrl) URL.revokeObjectURL(mixUrl);
     objectUrl = URL.createObjectURL(file);
+    mixUrl = null;
     audio.src = objectUrl;
     audio.playbackRate = Number(ui.speed.value);
     ui.title.textContent = file.name.replace(/\.[^.]+$/, '');
@@ -280,20 +291,21 @@ async function trackBeats(samples, id) {
   refresh();
 }
 
-// Separates the bass, other and drum stems, then analyzes the harmony (bass + other: no vocals,
-// no drums) for the chords and the bass stem alone for the bass line, and switches over to them.
-// The drums only tell whether the song has a beat to follow. Tempo stays on the full mix.
+// Separates the four stems, then analyzes the harmony (bass + other: no vocals, no drums) for the
+// chords and the bass stem alone for the bass line, and switches over to them. The drums only tell
+// whether the song has a beat to follow. Tempo stays on the full mix. All four stems are kept for
+// the stem volume sliders.
 async function separateHarmony(file, id) {
   showStatus('Preparing stem separation', 0);
   const stereo = await decodeToStereo(await file.arrayBuffer(), MODEL_SAMPLE_RATE);
   if (id !== loadId) return;
-  const { stems } = await runModel(
+  const result = await runModel(
     'stems',
-    { left: stereo[0], right: stereo[1], groups: [['bass'], ['other'], ['drums']] },
+    { left: stereo[0], right: stereo[1], groups: STEM_NAMES.map((name) => [name]) },
     stereo.map((c) => c.buffer),
   );
   if (id !== loadId) return;
-  const [bass, other, drums] = stems;
+  const [, drums, bass, other] = result.stems;
   const harmony = bass.map((channel, c) => channel.map((v, i) => v + other[c][i]));
   const energy = (stem) => stem.reduce((sum, channel) => sum + channel.reduce((s, v) => s + v * v, 0), 0);
   const drumEnergy = energy(drums);
@@ -306,6 +318,8 @@ async function separateHarmony(file, id) {
   const harmonyFrames = await analyze(harmony);
   const bassFrames = await analyze(bass);
   if (id !== loadId) return;
+  stems = result.stems.map(toInt16);
+  ui.stemMix.hidden = false;
   analysis.harmony = harmonyFrames;
   analysis.bassStem = bassFrames;
   ui.source.querySelector('[value=harmony]').disabled = false;
@@ -481,6 +495,29 @@ function seek(t) {
   timeline.setTime(clamped);
 }
 
+// Plays the stems mixed at the slider volumes, or the original file when all are at 100.
+let mixToken = 0;
+async function applyStemMix() {
+  const token = ++mixToken;
+  const gains = ui.stemVolumes.map(volumeOf);
+  let url = objectUrl;
+  if (gains.some((g) => g < 1)) {
+    url = URL.createObjectURL(mixToWav(stems, gains, MODEL_SAMPLE_RATE));
+  }
+  if (token !== mixToken) return URL.revokeObjectURL(url);
+  const time = audio.currentTime;
+  const playing = !audio.paused;
+  const old = mixUrl;
+  mixUrl = url === objectUrl ? null : url;
+  audio.src = url; // resets the playback rate and position
+  audio.playbackRate = Number(ui.speed.value);
+  audio.currentTime = time;
+  lastAudioTime = -1;
+  resetSchedule();
+  if (playing) await audio.play().catch(() => {});
+  if (old) URL.revokeObjectURL(old);
+}
+
 function togglePlay() {
   if (!analysis) return;
   startAudio();
@@ -649,6 +686,14 @@ ui.musicVolume.addEventListener('input', () => {
   startAudio();
   musicGain.gain.setTargetAtTime(volumeOf(ui.musicVolume), audioCtx.currentTime, 0.02);
 });
+// Remixing takes a moment and briefly reloads the song, so wait until the slider rests.
+let stemMixTimer = 0;
+for (const slider of ui.stemVolumes) {
+  slider.addEventListener('input', () => {
+    clearTimeout(stemMixTimer);
+    stemMixTimer = setTimeout(() => stems && applyStemMix(), 250);
+  });
+}
 ui.bassVolume.addEventListener('input', () => {
   startAudio();
   bassSynth.setVolume(volumeOf(ui.bassVolume));
