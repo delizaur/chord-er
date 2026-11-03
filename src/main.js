@@ -12,6 +12,7 @@ import {
   markPowerChords,
   noteNames,
   QUALITIES,
+  rebuildOnBass,
   refineChanges,
   respellSlash,
   splitByBass,
@@ -43,6 +44,7 @@ const ui = {
   slash: $('slash'),
   respell: $('respell'),
   early: $('early'),
+  rebuild: $('rebuild'),
   timing: $('timing'),
   notesLabel: $('notes-label'),
   dropzone: $('dropzone'),
@@ -82,6 +84,7 @@ const settings = {
   slash: true, // split chords where the bass note changes and show it as C/E
   respell: false, // re-spell slash chords rooted on the bass when that gives a familiar chord
   early: true, // start a chord where the bass already moved to it (Bb/D → Dm becomes an early Dm)
+  rebuild: false, // experimental: re-read slash chords as in-key chords rooted on the bass
   timing: 'auto', // chord changes on the 'beats', 'free' (where the harmony changes), or 'auto'
   tempo: '0:1', // "<steady-tempo candidate index, or 'ai' for Beat This!>:<tempo multiplier>"
   halfBeat: false,
@@ -148,8 +151,10 @@ async function loadFile(file) {
     settings.source = ui.source.value = 'mix';
     ui.source.querySelector('[value=harmony]').disabled = true;
     ui.source.parentElement.hidden = false;
-    ui.slash.disabled = ui.respell.disabled = ui.early.disabled = true;
-    ui.slash.parentElement.hidden = ui.respell.parentElement.hidden = ui.early.parentElement.hidden = false;
+    for (const box of [ui.slash, ui.respell, ui.early, ui.rebuild]) {
+      box.disabled = true;
+      box.parentElement.hidden = false;
+    }
     ui.timing.parentElement.hidden = false;
     stems = null;
     ui.stemMix.hidden = true;
@@ -343,7 +348,7 @@ async function separateHarmony(file, id) {
   analysis.bassStem = bassFrames;
   ui.source.querySelector('[value=harmony]').disabled = false;
   ui.slash.disabled = ui.early.disabled = false;
-  ui.respell.disabled = !ui.slash.checked;
+  ui.respell.disabled = ui.rebuild.disabled = !ui.slash.checked;
   settings.source = ui.source.value = 'harmony';
   key = null;
   refresh();
@@ -449,7 +454,10 @@ function refresh() {
   // The bass synth plays each piece's bass note (the root where the bass is unclear).
   song = { bass: pieces.map((p) => ({ start: p.start, pc: p.bass >= 0 ? p.bass : p.root })) };
   if (!settings.slash) pieces = pieces.map((p) => ({ ...p, bass: -1 }));
-  else if (settings.respell) pieces = pieces.map(respellSlash);
+  else {
+    if (settings.respell) pieces = pieces.map(respellSlash);
+    if (settings.rebuild) pieces = rebuildOnBass(pieces, chordGrid, key);
+  }
   pieces = mergeSameChord(pieces);
 
   const shownKey = transposeKey(key, settings.transpose);
@@ -756,7 +764,11 @@ ui.timing.addEventListener('change', () => {
 });
 ui.slash.addEventListener('change', () => {
   settings.slash = ui.slash.checked;
-  ui.respell.disabled = !ui.slash.checked;
+  ui.respell.disabled = ui.rebuild.disabled = !ui.slash.checked;
+  refresh();
+});
+ui.rebuild.addEventListener('change', () => {
+  settings.rebuild = ui.rebuild.checked;
   refresh();
 });
 ui.early.addEventListener('change', () => {

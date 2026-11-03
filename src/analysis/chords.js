@@ -392,6 +392,55 @@ export function anticipateChanges(pieces, beatLength) {
   return out;
 }
 
+// Chord qualities a slash chord may be rebuilt as, rooted on its bass note. (sus4 is left out:
+// melody notes a fourth above the bass made it win too easily.)
+const REBUILD_QUALITIES = ['maj', 'min', '7', 'maj7', 'm7'];
+const REBUILD_MARGIN = 0.03; // how much worse than the slash chord the rebuilt chord may fit
+const REBUILD_PRESENT = 0.3; // each of its notes reaches this share of the loudest note
+const REBUILD_DROPPED = 0.5; // notes of the slash chord it leaves out stay below this share
+
+const scaleOf = (key) => new Set((key.mode === 'minor' ? MINOR_SCALE : MAJOR_SCALE).map((d) => mod12(key.tonic + d)));
+
+// Experimental: re-reads each remaining slash chord X/Y as a chord rooted on its bass Y that fits
+// the key (Bm7/F# in B minor → F#m7), counting quieter notes the decoder passed over. Judged
+// from the piece's average chroma: the rebuilt chord, with its bass on the root, must fit nearly
+// as well as X/Y (both scored like the decoder: template fit plus the bass bonus), all its notes
+// must actually sound, and the notes of X it drops must be quiet. Otherwise X/Y stays.
+export function rebuildOnBass(pieces, grid, key) {
+  const scale = scaleOf(key);
+  const { treble, beats } = grid;
+  return pieces.map((p) => {
+    if (p.root < 0 || p.bass < 0) return p;
+    const i0 = Math.max(0, indexAt(beats, p.start + 1e-3));
+    const i1 = Math.max(i0 + 1, indexAt(beats, p.end - 1e-3) + 1);
+    const mean = new Float64Array(12);
+    for (let i = i0; i < i1; i++) {
+      const frame = treble.subarray(i * 12, i * 12 + 12);
+      const norm = Math.hypot(...frame) || 1;
+      for (let c = 0; c < 12; c++) mean[c] += frame[c] / norm;
+    }
+    const norm = Math.hypot(...mean) || 1;
+    const loudest = Math.max(...mean) || 1;
+    const level = (pc) => mean[pc] / loudest;
+    const fit = (root, intervals) => chordTemplate(root, intervals).reduce((sum, v, c) => sum + (v * mean[c]) / norm, 0);
+    const own = QUALITIES[p.quality].intervals.map((iv) => mod12(p.root + iv));
+    const bassInTriad = own.slice(0, 3).includes(p.bass);
+    const current = fit(p.root, QUALITIES[p.quality].intervals) + (bassInTriad ? BASS_WEIGHT * BASS_TONE : 0);
+
+    let best = null;
+    for (const quality of REBUILD_QUALITIES) {
+      const { intervals } = QUALITIES[quality];
+      const tones = intervals.map((iv) => mod12(p.bass + iv));
+      if (!tones.every((pc) => scale.has(pc))) continue;
+      if (tones.slice(1).some((pc) => level(pc) < REBUILD_PRESENT)) continue;
+      if (own.some((pc) => !tones.includes(pc) && level(pc) >= REBUILD_DROPPED)) continue;
+      const score = fit(p.bass, intervals) + BASS_WEIGHT;
+      if (score >= current - REBUILD_MARGIN && (!best || score > best.score)) best = { quality, score };
+    }
+    return best ? { ...p, root: p.bass, quality: best.quality, bass: -1 } : p;
+  });
+}
+
 // With more smoothing, short slash chords are left out: above 5, slash pieces up to
 // (smoothing − 5) / 2.5 beats long (1 beat at 7.5, 2 at 10) lose their slash and join the same
 // chord around them. `beatLength` is the typical beat length in seconds.

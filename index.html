@@ -45,6 +45,10 @@
           <input id="early" type="checkbox" checked />
           Early changes
         </label>
+        <label class="source" hidden title="Experimental: re-read a slash chord X/Y as a chord built on its bass note Y that fits the key, when the audio supports it nearly as well, counting quieter notes too (Bm7/F# in B minor → F#m7 when C# and E are there). Slash chords where that is a stretch stay as they are.">
+          <input id="rebuild" type="checkbox" />
+          Rebuild on bass
+        </label>
         <span id="key" class="pill" hidden></span>
         <span id="tempo" class="pill" hidden></span>
       </div>
