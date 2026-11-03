@@ -215,10 +215,14 @@ function segments(path, states, beats, duration) {
   return chords;
 }
 
+// A power chord's strongest third (minor or major) stays below this share of its root and fifth
+// level (log-compressed chroma), so the third is truly missing, not just quieter.
+const POWER_THIRD = 0.2;
+
 // Relabels major and minor chords whose third isn't heard as power chords (E5), instead of leaving
 // the key bias to guess. Judged over each whole chord, from its beats' average chroma: a power
-// chord when root + fifth fit it at least as well as the decoded triad does. Both templates
-// include harmonics, so the third that a root's own overtones add doesn't count as played.
+// chord when neither third reaches POWER_THIRD and root + fifth fit it at least as well as the
+// decoded triad does (both templates include harmonics).
 export function markPowerChords(chords, grid) {
   const { treble } = grid;
   const n = grid.beats.length;
@@ -232,7 +236,10 @@ export function markPowerChords(chords, grid) {
       for (let c = 0; c < 12; c++) mean[c] += frame[c] / norm;
     }
     const fit = (intervals) => chordTemplate(chord.root, intervals).reduce((sum, v, c) => sum + v * mean[c], 0);
-    return fit(QUALITIES[5].intervals) >= fit(QUALITIES[chord.quality].intervals) ? { ...chord, quality: '5' } : chord;
+    const at = (iv) => mean[mod12(chord.root + iv)];
+    const third = Math.max(at(3), at(4)) / ((at(0) + at(7)) / 2 || 1);
+    const power = third < POWER_THIRD && fit(QUALITIES[5].intervals) >= fit(QUALITIES[chord.quality].intervals);
+    return power ? { ...chord, quality: '5' } : chord;
   });
 }
 
