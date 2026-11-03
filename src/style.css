@@ -347,7 +347,7 @@ body.dragging .timeline-wrap {
 
 .timeline-wrap {
   flex: 1;
-  min-height: 200px;
+  min-height: 250px;
   border: 1px solid var(--border);
   border-radius: 16px;
   overflow: hidden;

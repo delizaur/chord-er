@@ -14,7 +14,45 @@ const COLORS = {
   waveAhead: '#8a97b8',
   playhead: '#ffcc4d',
   text: '#ffffff',
+  chromaRule: 'rgba(255,255,255,0.05)',
+  chromaLabels: 'rgba(17,19,26,0.8)',
+  chordTone: 'rgba(255,204,77,0.45)',
+  bassTone: 'rgba(79,195,247,0.55)',
 };
+
+// Chromagram brightness: from the timeline's background (silent) to white. The chord-tone and bass
+// overlays add the only tint.
+const CHROMA_DARK = [17, 19, 26]; // COLORS.background
+const CHROMA_LIGHT = [245, 245, 245];
+
+// Renders the chromagram once into a 12-pixel-tall image, one column per frame and C on the
+// bottom row. Each frame is scaled to its loudest note, so the brightest note of every moment
+// stands out, except that frames much quieter than the song's loud parts stay dim. Also returns
+// those per-frame levels (0–1), which light up the note names.
+function renderChroma({ frameTimes, values }) {
+  const n = frameTimes.length;
+  const maxima = Array.from({ length: n }, (_, f) => Math.max(...values.subarray(f * 12, f * 12 + 12)));
+  const reference = [...maxima].sort((a, b) => a - b)[Math.floor(0.95 * (n - 1))] || 1;
+  const floor = 0.25 * reference;
+  const canvas = document.createElement('canvas');
+  canvas.width = n;
+  canvas.height = 12;
+  const ctx = canvas.getContext('2d');
+  const image = ctx.createImageData(n, 12);
+  const levels = new Float32Array(n * 12);
+  for (let f = 0; f < n; f++) {
+    const scale = 1 / Math.max(maxima[f], floor);
+    for (let c = 0; c < 12; c++) {
+      const v = Math.min(1, values[f * 12 + c] * scale) ** 1.5;
+      levels[f * 12 + c] = v;
+      const i = ((11 - c) * n + f) * 4;
+      for (let k = 0; k < 3; k++) image.data[i + k] = CHROMA_DARK[k] + (CHROMA_LIGHT[k] - CHROMA_DARK[k]) * v;
+      image.data[i + 3] = 255;
+    }
+  }
+  ctx.putImageData(image, 0, 0);
+  return { canvas, levels, start: frameTimes[0], step: n > 1 ? frameTimes[1] - frameTimes[0] : 1 };
+}
 
 // Hue follows the circle of fifths so harmonically close chords look alike.
 function chordColor(root, quality, active) {
@@ -42,7 +80,13 @@ export class Timeline {
     this.bindInput();
   }
 
+  // `data.chroma` is { frameTimes, values (12 per frame), names }; `data.bass` the bass line as
+  // [{ start, pc }], which also splits the chord-tone overlay.
   setData(data) {
+    if (data.chroma.values !== this.chromaValues) {
+      this.chromaValues = data.chroma.values;
+      this.chromaImage = renderChroma(data.chroma);
+    }
     this.data = data;
     this.draw();
   }
@@ -126,15 +170,21 @@ export class Timeline {
     const { duration, beats, bars, chords, peaks, peaksPerSec } = this.data;
     const t0 = this.xToTime(0);
     const t1 = this.xToTime(W);
+    // Rows: ruler, chords, chromagram, waveform.
     const chordTop = RULER_HEIGHT + 6;
-    const chordHeight = Math.round((H - chordTop) * 0.55);
-    const waveTop = chordTop + chordHeight + 12;
-    const waveHeight = H - waveTop - 8;
+    const room = H - chordTop - 8;
+    const chordHeight = Math.round(Math.min(90, Math.max(56, room * 0.3)));
+    const waveHeight = Math.round(Math.min(56, Math.max(28, room * 0.16)));
+    const chromaTop = chordTop + chordHeight + 8;
+    const chromaHeight = Math.max(24, room - chordHeight - waveHeight - 16);
+    const waveTop = chromaTop + chromaHeight + 8;
 
     // Areas before the start / after the end of the song.
     ctx.fillStyle = COLORS.outside;
     if (t0 < 0) ctx.fillRect(0, 0, this.timeToX(0), H);
     if (t1 > duration) ctx.fillRect(this.timeToX(duration), 0, W, H);
+
+    this.drawChroma(chromaTop, chromaHeight, t0, t1);
 
     // Beat grid and bar numbers.
     ctx.font = '600 11px system-ui, sans-serif';
@@ -197,6 +247,7 @@ export class Timeline {
     // Dim what has already been played, then the playhead.
     ctx.fillStyle = COLORS.past;
     ctx.fillRect(0, chordTop, this.playX, chordHeight);
+    ctx.fillRect(0, chromaTop, this.playX, chromaHeight);
     ctx.fillStyle = COLORS.playhead;
     ctx.fillRect(this.playX - 1, 0, 2, H);
     ctx.beginPath();
@@ -204,6 +255,56 @@ export class Timeline {
     ctx.lineTo(this.playX + 6, 0);
     ctx.lineTo(this.playX, 8);
     ctx.fill();
+  }
+
+  // The chromagram, the detected chord tones (yellow) and bass note (blue) over it, and the note
+  // names along the left edge.
+  drawChroma(top, height, t0, t1) {
+    const { ctx } = this;
+    const { chords, bass, duration, chroma } = this.data;
+    const rowHeight = height / 12;
+    const rowY = (pc) => top + (11 - pc) * rowHeight;
+
+    const { canvas: image, levels, start, step } = this.chromaImage;
+    const from = Math.max(t0, start - step / 2, 0);
+    const to = Math.min(t1, duration, start + (image.width - 0.5) * step);
+    if (to > from) {
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(image, (from - start) / step + 0.5, 0, (to - from) / step, 12, this.timeToX(from), top, (to - from) * this.pxPerSec, height);
+      ctx.imageSmoothingEnabled = true;
+    }
+
+    // Per bass segment: the chord sounding at its start supplies the tones.
+    for (let i = Math.max(0, indexAt(bass, t0, (b) => b.start)); i < bass.length && bass[i].start <= t1; i++) {
+      const end = i + 1 < bass.length ? bass[i + 1].start : duration;
+      const x0 = this.timeToX(bass[i].start);
+      const w = this.timeToX(end) - x0;
+      const chord = chords[indexAt(chords, bass[i].start + 1e-6, (c) => c.start)];
+      ctx.fillStyle = COLORS.chordTone;
+      for (const pc of chord?.tones ?? []) if (pc !== bass[i].pc) ctx.fillRect(x0, rowY(pc), w, rowHeight);
+      if (bass[i].pc >= 0) {
+        ctx.fillStyle = COLORS.bassTone;
+        ctx.fillRect(x0, rowY(bass[i].pc), w, rowHeight);
+      }
+    }
+
+    ctx.fillStyle = COLORS.chromaRule;
+    for (let pc = 1; pc < 12; pc++) ctx.fillRect(0, Math.round(rowY(pc) + rowHeight) - 0.5, this.width, 1);
+
+    if (rowHeight < 7) return;
+    ctx.fillStyle = COLORS.chromaLabels;
+    ctx.fillRect(0, top, 26, height);
+    // Each name is as bright as its note at the playhead.
+    const frame = Math.round((this.time - start) / step);
+    const inSong = frame >= 0 && frame < image.width;
+    ctx.font = `600 ${Math.min(10, rowHeight - 1)}px system-ui, sans-serif`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    chroma.names.forEach((name, pc) => {
+      const level = inSong ? levels[frame * 12 + pc] : 0;
+      ctx.fillStyle = `rgba(255,255,255,${0.3 + 0.7 * level})`;
+      ctx.fillText(name, 5, rowY(pc) + rowHeight / 2 + 0.5);
+    });
   }
 
   // The label sticks to the left edge while its chord scrolls out of view.

@@ -469,6 +469,8 @@ function refresh() {
     beats,
     bars,
     chords: song.chords,
+    bass: song.bass,
+    chroma: { frameTimes: frames.frameTimes, values: frames.treble, names: noteNames(key) },
     peaks: analysis.peaks,
     peaksPerSec: analysis.peaksPerSec,
   });
