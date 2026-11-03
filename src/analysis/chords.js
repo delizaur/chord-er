@@ -366,6 +366,32 @@ function absorbShort(pieces, min) {
   }
 }
 
+// Chord changes the bass plays ahead of the harmony: a short slash piece (up to 2 beats) right
+// before a different chord, whose bass is that chord's root (Bb/D → Dm), is where the bass already
+// moved to the next chord, often a syncopated change ahead of the downbeat that the smoothed
+// harmony picks up late. The next chord starts there instead. `beatLength` is the typical beat
+// length in seconds.
+export function anticipateChanges(pieces, beatLength) {
+  const limit = 2 * beatLength * 1.1; // beats vary a little in length
+  const out = [];
+  let carried = null; // start of a dropped slash piece, taken over by the next chord
+  pieces.forEach((piece, k) => {
+    const p = carried ? { ...piece, ...carried } : piece;
+    const next = pieces[k + 1];
+    carried =
+      next &&
+      p.bass >= 0 &&
+      p.bass === next.root &&
+      (next.bass < 0 || next.bass === next.root) &&
+      (next.root !== p.root || next.quality !== p.quality) &&
+      p.end - p.start <= limit
+        ? { start: p.start, startBeat: p.startBeat }
+        : null;
+    if (!carried) out.push(p);
+  });
+  return out;
+}
+
 // With more smoothing, short slash chords are left out: above 5, slash pieces up to
 // (smoothing − 5) / 2.5 beats long (1 beat at 7.5, 2 at 10) lose their slash and join the same
 // chord around them. `beatLength` is the typical beat length in seconds.
