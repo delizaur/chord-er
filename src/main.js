@@ -8,6 +8,7 @@ import {
   dropShortSlashes,
   indexAt,
   keyLabel,
+  markPowerChords,
   noteNames,
   QUALITIES,
   refineChanges,
@@ -20,6 +21,7 @@ import { beatSync, buildBeats, timeSlots } from './analysis/grid.js';
 import { MODEL_CACHE, MODEL_URLS } from './modelFiles.js';
 import { MODEL_SAMPLE_RATE } from './separation/demucs.js';
 import { mixToWav, toInt16 } from './stemMix.js';
+import { loadStems, saveStems } from './devStemCache.js';
 import { BassSynth, ChordSynth, Metronome, chordVoicing } from './synth.js';
 import { NoteGraph } from './view/noteGraph.js';
 import { Timeline } from './view/timeline.js';
@@ -61,6 +63,7 @@ const ui = {
   halfBeat: $('half-beat'),
   speed: $('speed'),
   vocabulary: $('vocabulary'),
+  power: $('power'),
   smoothing: $('smoothing'),
   keyBias: $('key-bias'),
   meter: $('meter'),
@@ -80,6 +83,7 @@ const settings = {
   tempo: '0:1', // "<steady-tempo candidate index, or 'ai' for Beat This!>:<tempo multiplier>"
   halfBeat: false,
   vocabulary: 'sevenths',
+  power: true, // power chords (root + fifth, shown as E5) where no third is heard
   smoothing: 5,
   keyBias: 0.1, // score bonus for chords that fit the key (slider value × 0.02)
   beatsPerBar: 4,
@@ -300,15 +304,24 @@ async function trackBeats(samples, id) {
 // the stem volume sliders.
 async function separateHarmony(file, id) {
   showStatus('Preparing stem separation', 0);
-  const stereo = await decodeToStereo(await file.arrayBuffer(), MODEL_SAMPLE_RATE);
+  // In development, a song's stems are reused from earlier runs (see devStemCache.js).
+  let stored = import.meta.env.DEV ? await loadStems(file, STEM_NAMES.length) : null;
+  let separated;
+  if (stored) {
+    separated = stored.map((stem) => stem.map((channel) => Float32Array.from(channel, (v) => v / 32767)));
+  } else {
+    const stereo = await decodeToStereo(await file.arrayBuffer(), MODEL_SAMPLE_RATE);
+    if (id !== loadId) return;
+    ({ stems: separated } = await runModel(
+      'stems',
+      { left: stereo[0], right: stereo[1], groups: STEM_NAMES.map((name) => [name]) },
+      stereo.map((c) => c.buffer),
+    ));
+    stored = separated.map(toInt16);
+    if (import.meta.env.DEV) saveStems(file, stored);
+  }
   if (id !== loadId) return;
-  const result = await runModel(
-    'stems',
-    { left: stereo[0], right: stereo[1], groups: STEM_NAMES.map((name) => [name]) },
-    stereo.map((c) => c.buffer),
-  );
-  if (id !== loadId) return;
-  const [, drums, bass, other] = result.stems;
+  const [, drums, bass, other] = separated;
   const harmony = bass.map((channel, c) => channel.map((v, i) => v + other[c][i]));
   const energy = (stem) => stem.reduce((sum, channel) => sum + channel.reduce((s, v) => s + v * v, 0), 0);
   const drumEnergy = energy(drums);
@@ -321,7 +334,7 @@ async function separateHarmony(file, id) {
   const harmonyFrames = await analyze(harmony);
   const bassFrames = await analyze(bass);
   if (id !== loadId) return;
-  stems = result.stems.map(toInt16);
+  stems = stored;
   ui.stemMix.hidden = false;
   analysis.harmony = harmonyFrames;
   analysis.bassStem = bassFrames;
@@ -421,6 +434,7 @@ function refresh() {
     chordGrid = { duration, beats: slots, downbeats: null, uniform: true, ...beatSync(slots, duration, frames, bassFrames) };
     ({ chords } = decodeChords(chordGrid, key, settings));
   }
+  if (settings.power) chords = markPowerChords(chords, chordGrid);
   // Pieces of constant chord and bass note. The bass line needs the bass stem: in the full mix
   // the kick drum reads as bass notes.
   const detectedBass = analysis.bassStem ? decodeBassLine(chordGrid, settings.smoothing) : null;
@@ -753,6 +767,10 @@ ui.tempoSelect.addEventListener('change', () => {
 });
 ui.halfBeat.addEventListener('change', () => {
   settings.halfBeat = ui.halfBeat.checked;
+  refresh();
+});
+ui.power.addEventListener('change', () => {
+  settings.power = ui.power.checked;
   refresh();
 });
 ui.vocabulary.addEventListener('change', () => {

@@ -10,6 +10,9 @@ export const QUALITIES = {
   m7: { suffix: 'm7', intervals: [0, 3, 7, 10], penalty: 0.03 },
   dim: { suffix: 'dim', intervals: [0, 3, 6], penalty: 0.05 },
   sus4: { suffix: 'sus4', intervals: [0, 5, 7], penalty: 0.05 },
+  // Power chord (root and fifth, no third): a major or minor chord is relabeled when its third
+  // isn't heard, by markPowerChords.
+  5: { suffix: '5', intervals: [0, 7] },
   // Only reached by re-spelling slash chords, never detected directly.
   sus2: { suffix: 'sus2', intervals: [0, 2, 7] },
   6: { suffix: '6', intervals: [0, 4, 7, 9] },
@@ -210,6 +213,27 @@ function segments(path, states, beats, duration) {
     chords.push({ start: beats[i], end: duration, startBeat: i, root, quality });
   }
   return chords;
+}
+
+// Relabels major and minor chords whose third isn't heard as power chords (E5), instead of leaving
+// the key bias to guess. Judged over each whole chord, from its beats' average chroma: a power
+// chord when root + fifth fit it at least as well as the decoded triad does. Both templates
+// include harmonics, so the third that a root's own overtones add doesn't count as played.
+export function markPowerChords(chords, grid) {
+  const { treble } = grid;
+  const n = grid.beats.length;
+  return chords.map((chord, k) => {
+    if (chord.quality !== 'maj' && chord.quality !== 'min') return chord;
+    const end = k + 1 < chords.length ? chords[k + 1].startBeat : n;
+    const mean = new Float64Array(12);
+    for (let i = chord.startBeat; i < end; i++) {
+      const frame = treble.subarray(i * 12, i * 12 + 12);
+      const norm = Math.hypot(...frame) || 1;
+      for (let c = 0; c < 12; c++) mean[c] += frame[c] / norm;
+    }
+    const fit = (intervals) => chordTemplate(chord.root, intervals).reduce((sum, v, c) => sum + v * mean[c], 0);
+    return fit(QUALITIES[5].intervals) >= fit(QUALITIES[chord.quality].intervals) ? { ...chord, quality: '5' } : chord;
+  });
 }
 
 const BASS_KAPPA = 6; // emission scale for bass notes
