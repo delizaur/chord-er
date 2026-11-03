@@ -13,10 +13,12 @@ export const QUALITIES = {
   // Only reached by re-spelling slash chords, never detected directly.
   sus2: { suffix: 'sus2', intervals: [0, 2, 7] },
   6: { suffix: '6', intervals: [0, 4, 7, 9] },
+  m9: { suffix: 'm9', intervals: [0, 3, 7, 10, 14] },
 };
 
-// The familiar chords a slash chord may be re-spelled as, rooted on its bass note.
-const RESPELL_QUALITIES = ['maj', 'min', 'maj7', 'm7', '7', 'dim', 'sus4', 'sus2', '6'];
+// The familiar chords a slash chord may be re-spelled as, rooted on its bass note. m9 is only
+// reachable from a maj7 over its 6th (Dbmaj7/Bb → Bbm9).
+const RESPELL_QUALITIES = ['maj', 'min', 'maj7', 'm7', '7', 'dim', 'sus4', 'sus2', '6', 'm9'];
 
 export const VOCABULARIES = {
   basic: ['maj', 'min'],
@@ -404,7 +406,7 @@ export function noteNames(key) {
 
 // "C", "Am7", or with a bass note other than the root, slash notation: "C/E".
 // Re-spells a slash chord as the chord rooted on its bass note when its notes plus the bass form
-// exactly one of RESPELL_QUALITIES: F#sus4/B → Bsus2, C/A → Am7, G/E → Em7. Others, such as C/B
+// exactly one of RESPELL_QUALITIES: F#sus4/B → Bsus2, C/A → Am7, Dbmaj7/Bb → Bbm9. Others, such as C/B
 // or C/E, stay as they are.
 export function respellSlash(chord) {
   if (chord.root < 0 || chord.bass < 0) return chord;
