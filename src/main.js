@@ -11,6 +11,7 @@ import {
   noteNames,
   QUALITIES,
   refineChanges,
+  respellSlash,
   splitByBass,
   transposeKey,
   transposeRoot,
@@ -37,6 +38,7 @@ const ui = {
   modelDialog: $('model-dialog'),
   source: $('source'),
   slash: $('slash'),
+  respell: $('respell'),
   timing: $('timing'),
   notesLabel: $('notes-label'),
   dropzone: $('dropzone'),
@@ -73,6 +75,7 @@ const ui = {
 const settings = {
   source: 'mix', // chords from the full 'mix' or the separated 'harmony' (bass + other)
   slash: true, // split chords where the bass note changes and show it as C/E
+  respell: false, // re-spell slash chords rooted on the bass when that gives a familiar chord
   timing: 'auto', // chord changes on the 'beats', 'free' (where the harmony changes), or 'auto'
   tempo: '0:1', // "<steady-tempo candidate index, or 'ai' for Beat This!>:<tempo multiplier>"
   halfBeat: false,
@@ -138,8 +141,8 @@ async function loadFile(file) {
     settings.source = ui.source.value = 'mix';
     ui.source.querySelector('[value=harmony]').disabled = true;
     ui.source.parentElement.hidden = false;
-    ui.slash.disabled = true;
-    ui.slash.parentElement.hidden = false;
+    ui.slash.disabled = ui.respell.disabled = true;
+    ui.slash.parentElement.hidden = ui.respell.parentElement.hidden = false;
     ui.timing.parentElement.hidden = false;
     stems = null;
     ui.stemMix.hidden = true;
@@ -324,6 +327,7 @@ async function separateHarmony(file, id) {
   analysis.bassStem = bassFrames;
   ui.source.querySelector('[value=harmony]').disabled = false;
   ui.slash.disabled = false;
+  ui.respell.disabled = !ui.slash.checked;
   settings.source = ui.source.value = 'harmony';
   key = null;
   refresh();
@@ -425,7 +429,9 @@ function refresh() {
   pieces = dropShortSlashes(pieces, settings.smoothing, 60 / medianBpm(beats));
   // The bass synth plays each piece's bass note (the root where the bass is unclear).
   song = { bass: pieces.map((p) => ({ start: p.start, pc: p.bass >= 0 ? p.bass : p.root })) };
-  if (!settings.slash) pieces = mergeSameChord(pieces);
+  if (!settings.slash) pieces = pieces.map((p) => ({ ...p, bass: -1 }));
+  else if (settings.respell) pieces = pieces.map(respellSlash);
+  pieces = mergeSameChord(pieces);
 
   const shownKey = transposeKey(key, settings.transpose);
   Object.assign(song, {
@@ -478,8 +484,8 @@ function mergeSameChord(pieces) {
   const out = [];
   for (const p of pieces) {
     const last = out[out.length - 1];
-    if (last && last.root === p.root && last.quality === p.quality) last.end = p.end;
-    else out.push({ ...p, bass: -1 });
+    if (last && last.root === p.root && last.quality === p.quality && last.bass === p.bass) last.end = p.end;
+    else out.push({ ...p });
   }
   return out;
 }
@@ -729,6 +735,11 @@ ui.timing.addEventListener('change', () => {
 });
 ui.slash.addEventListener('change', () => {
   settings.slash = ui.slash.checked;
+  ui.respell.disabled = !ui.slash.checked;
+  refresh();
+});
+ui.respell.addEventListener('change', () => {
+  settings.respell = ui.respell.checked;
   refresh();
 });
 ui.source.addEventListener('change', () => {

@@ -10,7 +10,13 @@ export const QUALITIES = {
   m7: { suffix: 'm7', intervals: [0, 3, 7, 10], penalty: 0.03 },
   dim: { suffix: 'dim', intervals: [0, 3, 6], penalty: 0.05 },
   sus4: { suffix: 'sus4', intervals: [0, 5, 7], penalty: 0.05 },
+  // Only reached by re-spelling slash chords, never detected directly.
+  sus2: { suffix: 'sus2', intervals: [0, 2, 7] },
+  6: { suffix: '6', intervals: [0, 4, 7, 9] },
 };
+
+// The familiar chords a slash chord may be re-spelled as, rooted on its bass note.
+const RESPELL_QUALITIES = ['maj', 'min', 'maj7', 'm7', '7', 'dim', 'sus4', 'sus2', '6'];
 
 export const VOCABULARIES = {
   basic: ['maj', 'min'],
@@ -397,6 +403,22 @@ export function noteNames(key) {
 }
 
 // "C", "Am7", or with a bass note other than the root, slash notation: "C/E".
+// Re-spells a slash chord as the chord rooted on its bass note when its notes plus the bass form
+// exactly one of RESPELL_QUALITIES: F#sus4/B → Bsus2, C/A → Am7, G/E → Em7. Others, such as C/B
+// or C/E, stay as they are.
+export function respellSlash(chord) {
+  if (chord.root < 0 || chord.bass < 0) return chord;
+  const notes = new Set(QUALITIES[chord.quality].intervals.map((iv) => mod12(chord.root + iv)));
+  notes.add(chord.bass);
+  for (const quality of RESPELL_QUALITIES) {
+    const { intervals } = QUALITIES[quality];
+    if (intervals.length === notes.size && intervals.every((iv) => notes.has(mod12(chord.bass + iv)))) {
+      return { ...chord, root: chord.bass, quality, bass: -1 };
+    }
+  }
+  return chord;
+}
+
 export function chordLabel(root, quality, key, bass = -1) {
   if (root < 0) return 'N.C.';
   const names = noteNames(key);
