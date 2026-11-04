@@ -17,7 +17,27 @@ export const QUALITIES = {
   sus2: { suffix: 'sus2', intervals: [0, 2, 7] },
   6: { suffix: '6', intervals: [0, 4, 7, 9] },
   m9: { suffix: 'm9', intervals: [0, 3, 7, 10, 14] },
+  // Only in Chordino's output.
+  aug: { suffix: 'aug', intervals: [0, 4, 8] },
+  m6: { suffix: 'm6', intervals: [0, 3, 7, 9] },
+  m7b5: { suffix: 'm7b5', intervals: [0, 3, 6, 10] },
 };
+
+const NOTE_LETTERS = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
+const CHORDINO_QUALITIES = { '': 'maj', m: 'min', 7: '7', maj7: 'maj7', m7: 'm7', 6: '6', m6: 'm6', dim: 'dim', aug: 'aug', m7b5: 'm7b5' };
+
+// Parses a Chordino label ("F#m7", "C/E", "Bbmaj7", "N") into { root, quality, bass }, with -1 for
+// no chord or no slash bass.
+export function parseChordLabel(label) {
+  const match = /^([A-G])([#b]?)([^/]*)(?:\/([A-G])([#b]?))?$/.exec(label);
+  if (!match) return { root: -1, quality: 'N', bass: -1 };
+  const pc = (letter, accidental) => mod12(NOTE_LETTERS[letter] + (accidental === '#' ? 1 : accidental === 'b' ? -1 : 0));
+  return {
+    root: pc(match[1], match[2]),
+    quality: CHORDINO_QUALITIES[match[3]] ?? 'maj',
+    bass: match[4] ? pc(match[4], match[5]) : -1,
+  };
+}
 
 // The familiar chords a slash chord may be re-spelled as, rooted on its bass note. m9 is only
 // reachable from a maj7 over its 6th (Dbmaj7/Bb → Bbm9).

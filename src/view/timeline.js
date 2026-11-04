@@ -58,7 +58,7 @@ function renderChroma({ frameTimes, values }) {
 function chordColor(root, quality, active) {
   if (root < 0) return active ? '#3a3f4d' : '#262a34';
   const hue = ((root * 7) % 12) * 30;
-  const minorish = quality === 'min' || quality === 'm7' || quality === 'm9' || quality === 'dim';
+  const minorish = ['min', 'm7', 'm9', 'm6', 'm7b5', 'dim'].includes(quality);
   const sat = minorish ? 38 : 55;
   const light = (minorish ? 30 : 38) + (active ? 14 : 0);
   return `hsl(${hue} ${sat}% ${light}%)`;

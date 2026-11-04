@@ -11,6 +11,7 @@ import {
   keyLabel,
   markPowerChords,
   noteNames,
+  parseChordLabel,
   QUALITIES,
   rebuildOnBass,
   refineChanges,
@@ -80,7 +81,9 @@ const ui = {
 };
 
 const settings = {
-  source: 'mix', // chords from the full 'mix' or the separated 'harmony' (bass + other)
+  // Chords from the full 'mix' or the separated 'harmony' (bass + other), by chord-er's detector, or
+  // by Chordino from either ('chordino-mix', 'chordino-harmony').
+  source: 'mix',
   slash: true, // split chords where the bass note changes and show it as C/E
   respell: false, // re-spell slash chords rooted on the bass when that gives a familiar chord
   early: true, // start a chord where the bass already moved to it (Bb/D → Dm becomes an early Dm)
@@ -109,9 +112,11 @@ const workers = { beats: null, stems: null };
 const createWorker = {
   beats: () => new Worker(new URL('./beats/worker.js', import.meta.url), { type: 'module' }),
   stems: () => new Worker(new URL('./separation/worker.js', import.meta.url), { type: 'module' }),
+  chordino: () => new Worker(new URL('./chordino/worker.js', import.meta.url), { type: 'module' }),
 };
 const busy = new Set();
 let loadId = 0; // identifies the current song, so results for a replaced song are dropped
+let songFile = null; // the loaded file, decoded again for Chordino
 let objectUrl = null; // the original file
 let mixUrl = null; // the current stem mix, when any stem volume is below 100
 
@@ -148,8 +153,10 @@ async function loadFile(file) {
     analysis = await runAnalysis({ samples, sampleRate: ANALYSIS_SAMPLE_RATE }, showProgress);
     key = null;
     populateTempoOptions();
+    songFile = file;
+    analysis.chordino = {};
     settings.source = ui.source.value = 'mix';
-    ui.source.querySelector('[value=harmony]').disabled = true;
+    for (const value of ['harmony', 'chordino-harmony']) ui.source.querySelector(`[value=${value}]`).disabled = true;
     ui.source.parentElement.hidden = false;
     for (const box of [ui.slash, ui.respell, ui.early, ui.rebuild]) {
       box.disabled = true;
@@ -346,12 +353,52 @@ async function separateHarmony(file, id) {
   ui.stemMix.hidden = false;
   analysis.harmony = harmonyFrames;
   analysis.bassStem = bassFrames;
-  ui.source.querySelector('[value=harmony]').disabled = false;
+  for (const value of ['harmony', 'chordino-harmony']) ui.source.querySelector(`[value=${value}]`).disabled = false;
   ui.slash.disabled = ui.early.disabled = false;
   ui.respell.disabled = ui.rebuild.disabled = !ui.slash.checked;
-  settings.source = ui.source.value = 'harmony';
+  if (!settings.source.startsWith('chordino')) settings.source = ui.source.value = 'harmony';
   key = null;
   refresh();
+}
+
+// Chordino's chords for the full mix or the harmony stems, computed when first chosen.
+const CHORDINO_RATE = 44100;
+async function runChordino(which) {
+  const id = loadId;
+  showStatus('Running Chordino');
+  try {
+    let samples;
+    if (which === 'mix') samples = await decodeToMono(await songFile.arrayBuffer(), CHORDINO_RATE);
+    else {
+      // Bass + other, in stereo at the model's 44.1 kHz rate, mixed down.
+      const [, , bass, other] = stems;
+      samples = new Float32Array(bass[0].length);
+      for (const stem of [bass, other]) {
+        for (const channel of stem) for (let i = 0; i < samples.length; i++) samples[i] += channel[i] / (2 * 32767);
+      }
+    }
+    const { chords } = await runModel('chordino', { samples, sampleRate: CHORDINO_RATE }, [samples.buffer]);
+    if (id !== loadId) return;
+    analysis.chordino[which] = chords;
+    showStatus(null);
+    refresh();
+  } catch (err) {
+    console.error(err);
+    if (id === loadId) showStatus('Chordino failed');
+  }
+}
+
+// Chordino's labels as chord pieces, each lasting until the next.
+function chordinoPieces(labels, duration) {
+  const pieces = labels.map(({ time, label }, k) => ({
+    start: time,
+    end: k + 1 < labels.length ? labels[k + 1].time : duration,
+    ...parseChordLabel(label),
+  }));
+  if (!pieces.length || pieces[0].start > 0) {
+    pieces.unshift({ start: 0, end: pieces[0]?.start ?? duration, root: -1, quality: 'N', bass: -1 });
+  }
+  return pieces;
 }
 
 function showStatus(stage, value) {
@@ -427,7 +474,8 @@ function refresh() {
   const mult = Number(multiplier);
   const beatSource = index === 'ai' ? tracked : (tempoCandidates[Number(index)] ?? null);
   const { beats, downbeats } = buildBeats(beatSource, { mult, half: settings.halfBeat }, duration);
-  const frames = settings.source === 'harmony' && analysis.harmony ? analysis.harmony : analysis;
+  const fromHarmony = settings.source === 'harmony' || settings.source === 'chordino-harmony';
+  const frames = fromHarmony && analysis.harmony ? analysis.harmony : analysis;
   grid = { duration, beats, downbeats, ...beatSync(beats, duration, frames, analysis.bassStem ?? frames) };
   key ??= detectKey(grid);
 
@@ -442,21 +490,30 @@ function refresh() {
     chordGrid = { duration, beats: slots, downbeats: null, uniform: true, ...beatSync(slots, duration, frames, bassFrames) };
     ({ chords } = decodeChords(chordGrid, key, settings));
   }
-  if (settings.power) chords = markPowerChords(chords, chordGrid);
-  // Pieces of constant chord and bass note. The bass line needs the bass stem: in the full mix
-  // the kick drum reads as bass notes.
-  const detectedBass = analysis.bassStem ? decodeBassLine(chordGrid, settings.smoothing) : null;
-  let pieces = detectedBass ? splitByBass(chords, detectedBass, chordGrid.beats) : chords.map((c) => ({ ...c, bass: -1 }));
-  if (free) pieces = refineChanges(pieces, frames, bassFrames);
-  const beatLength = 60 / medianBpm(beats);
-  if (detectedBass && settings.early) pieces = anticipateChanges(pieces, beatLength);
-  pieces = dropShortSlashes(pieces, settings.smoothing, beatLength);
-  // The bass synth plays each piece's bass note (the root where the bass is unclear).
-  song = { bass: pieces.map((p) => ({ start: p.start, pc: p.bass >= 0 ? p.bass : p.root })) };
-  if (!settings.slash) pieces = pieces.map((p) => ({ ...p, bass: -1 }));
-  else {
-    if (settings.respell) pieces = pieces.map(respellSlash);
-    if (settings.rebuild) pieces = rebuildOnBass(pieces, chordGrid, key);
+  // Chordino's chords are shown as it labels them, with its own timing and slash chords.
+  const chordino = settings.source.startsWith('chordino') ? analysis.chordino[settings.source.slice('chordino-'.length)] : null;
+  let pieces;
+  if (chordino) {
+    pieces = chordinoPieces(chordino, duration);
+    song = { bass: pieces.map((p) => ({ start: p.start, pc: p.bass >= 0 ? p.bass : p.root })) };
+    if (!settings.slash) pieces = pieces.map((p) => ({ ...p, bass: -1 }));
+  } else {
+    if (settings.power) chords = markPowerChords(chords, chordGrid);
+    // Pieces of constant chord and bass note. The bass line needs the bass stem: in the full mix
+    // the kick drum reads as bass notes.
+    const detectedBass = analysis.bassStem ? decodeBassLine(chordGrid, settings.smoothing) : null;
+    pieces = detectedBass ? splitByBass(chords, detectedBass, chordGrid.beats) : chords.map((c) => ({ ...c, bass: -1 }));
+    if (free) pieces = refineChanges(pieces, frames, bassFrames);
+    const beatLength = 60 / medianBpm(beats);
+    if (detectedBass && settings.early) pieces = anticipateChanges(pieces, beatLength);
+    pieces = dropShortSlashes(pieces, settings.smoothing, beatLength);
+    // The bass synth plays each piece's bass note (the root where the bass is unclear).
+    song = { bass: pieces.map((p) => ({ start: p.start, pc: p.bass >= 0 ? p.bass : p.root })) };
+    if (!settings.slash) pieces = pieces.map((p) => ({ ...p, bass: -1 }));
+    else {
+      if (settings.respell) pieces = pieces.map(respellSlash);
+      if (settings.rebuild) pieces = rebuildOnBass(pieces, chordGrid, key);
+    }
   }
   pieces = mergeSameChord(pieces);
 
@@ -783,6 +840,8 @@ ui.source.addEventListener('change', () => {
   settings.source = ui.source.value;
   key = null;
   refresh();
+  const which = settings.source.startsWith('chordino') ? settings.source.slice('chordino-'.length) : null;
+  if (which && !analysis.chordino[which]) runChordino(which);
 });
 ui.tempoSelect.addEventListener('change', () => {
   settings.tempo = ui.tempoSelect.value;
