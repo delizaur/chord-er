@@ -198,6 +198,10 @@
               <label class="check"><input data-allow="dim" type="checkbox" /> dim</label>
               <label class="check"><input data-allow="aug" type="checkbox" /> aug</label>
             </div>
+            <label class="check" title="Merge neighbouring chords that share root and bass but differ in quality (Bm and Bm7, or Bm/F# and Bm7/F#) into one, with the quality that best fits the notes heard over both.">
+              <input id="merge" type="checkbox" />
+              Merge similar chords
+            </label>
             <div class="subhead">Bass</div>
             <label class="check" title="Detect the bass note (from the bass stem: needs the stem separation AI model) and show it as a slash chord, e.g. C/E, when it isn't the chord's root.">
               <input id="slash" type="checkbox" />

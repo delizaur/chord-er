@@ -11,6 +11,7 @@ import {
   indexAt,
   keyLabel,
   markPowerChords,
+  mergeSimilar,
   noteNames,
   parseChordLabel,
   QUALITIES,
@@ -64,6 +65,7 @@ const ui = {
   respell: $('respell'),
   early: $('early'),
   rebuild: $('rebuild'),
+  merge: $('merge'),
   mixRows: [...document.querySelectorAll('.mix-row')],
   stemRows: $('stem-rows'),
   stemsMissing: $('stems-missing'),
@@ -107,6 +109,7 @@ const DEFAULTS = {
   respell: false, // re-spell slash chords rooted on the bass when that gives a familiar chord
   early: true, // start a chord where the bass already moved to it (Bb/D → Dm becomes an early Dm)
   rebuild: false, // experimental: re-read slash chords as in-key chords rooted on the bass
+  merge: false, // merge neighbouring chords that differ only in quality (Bm, Bm7) into the best fit
   mixer: {
     music: channel(100),
     click: channel(0),
@@ -597,7 +600,7 @@ function refresh() {
     if (prefs.respell) pieces = pieces.map(respellSlash);
     if (prefs.rebuild && !chordino) pieces = rebuildOnBass(pieces, chordGrid, key);
   }
-  pieces = mergeSameChord(pieces);
+  pieces = prefs.merge ? mergeSimilar(pieces, frames) : mergeSameChord(pieces);
 
   const shownKey = transposeKey(key, view.transpose);
   Object.assign(song, {
@@ -928,6 +931,7 @@ function syncControls() {
   ui.respell.checked = prefs.respell;
   ui.early.checked = prefs.early;
   ui.rebuild.checked = prefs.rebuild;
+  ui.merge.checked = prefs.merge;
   ui.respell.disabled = !prefs.slash;
   // Early changes and rebuilding work on chord-er's own chords.
   ui.early.disabled = ui.rebuild.disabled = !prefs.slash || prefs.detector !== 'chorder';
@@ -1006,7 +1010,7 @@ for (const box of ui.allow) {
     changed();
   });
 }
-for (const name of ['slash', 'respell', 'early', 'rebuild']) {
+for (const name of ['slash', 'respell', 'early', 'rebuild', 'merge']) {
   ui[name].addEventListener('change', () => {
     prefs[name] = ui[name].checked;
     changed();

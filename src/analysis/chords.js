@@ -475,6 +475,33 @@ export function rebuildOnBass(pieces, grid, key) {
   });
 }
 
+// Merges runs of neighbouring chords that share root and bass but differ in quality (Bm, Bm7;
+// Bm/F#, Bm7/F#) into one chord, with the run's quality that best fits the notes heard over the
+// whole run: its average chroma (`frames`: { frameTimes, treble }) against each quality's template.
+export function mergeSimilar(pieces, frames) {
+  const same = (a, b) => a.root >= 0 && a.root === b.root && a.bass === b.bass;
+  const out = [];
+  for (let i = 0; i < pieces.length; ) {
+    let j = i + 1;
+    while (j < pieces.length && same(pieces[i], pieces[j])) j++;
+    const run = pieces.slice(i, j);
+    const qualities = [...new Set(run.map((p) => p.quality))];
+    let quality = qualities[0];
+    if (qualities.length > 1) {
+      const { frameTimes, treble } = frames;
+      const mean = new Float64Array(12);
+      for (let f = Math.max(0, indexAt(frameTimes, run[0].start)); f < frameTimes.length && frameTimes[f] < run[run.length - 1].end; f++) {
+        for (let c = 0; c < 12; c++) mean[c] += treble[f * 12 + c];
+      }
+      const fit = (q) => chordTemplate(run[0].root, QUALITIES[q].intervals).reduce((sum, v, c) => sum + v * mean[c], 0);
+      quality = qualities.reduce((best, q) => (fit(q) > fit(best) ? q : best));
+    }
+    out.push({ ...run[0], quality, end: run[run.length - 1].end });
+    i = j;
+  }
+  return out;
+}
+
 // Puts chords found with their own timing (Chordino's) on the beat grid: each beat gets the chord
 // that covers most of it, and neighbouring beats with the same chord (and bass) join.
 export function snapToBeats(pieces, beats, duration) {
