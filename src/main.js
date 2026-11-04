@@ -1,6 +1,7 @@
 import './style.css';
 import { decodeToMono, decodeToStereo, resampleToMono } from './audio.js';
 import {
+  allowedQuality,
   anticipateChanges,
   chordLabel,
   decodeBassLine,
@@ -19,9 +20,10 @@ import {
   splitByBass,
   transposeKey,
   transposeRoot,
+  vocabularyFor,
 } from './analysis/chords.js';
 import { beatSync, buildBeats, timeSlots } from './analysis/grid.js';
-import { MODEL_CACHE, MODEL_URLS } from './modelFiles.js';
+import { BEAT_FRONTEND_URL, BEAT_MODEL_URL, MODEL_CACHE, SEPARATION_MODEL_URL } from './modelFiles.js';
 import { MODEL_SAMPLE_RATE } from './separation/demucs.js';
 import { mixToWav, toInt16 } from './stemMix.js';
 import { loadStems, saveStems } from './devStemCache.js';
@@ -39,14 +41,29 @@ const ui = {
   key: $('key'),
   tempo: $('tempo'),
   status: $('status'),
-  enableModels: $('enable-models'),
   modelDialog: $('model-dialog'),
+  modelTitle: $('model-title'),
+  modelPurpose: $('model-purpose'),
+  modelDownload: $('model-download'),
+  sections: [...document.querySelectorAll('.sidebar details')],
   source: $('source'),
+  timing: $('timing'),
+  tempoSelect: $('tempo-select'),
+  halfBeat: $('half-beat'),
+  meter: $('meter'),
+  detector: $('detector'),
+  chorderOptions: $('chorder-options'),
+  smoothing: $('smoothing'),
+  keyBias: $('key-bias'),
+  allow: [...document.querySelectorAll('[data-allow]')],
   slash: $('slash'),
   respell: $('respell'),
   early: $('early'),
   rebuild: $('rebuild'),
-  timing: $('timing'),
+  mixRows: [...document.querySelectorAll('.mix-row')],
+  stemRows: $('stem-rows'),
+  stemsMissing: $('stems-missing'),
+  separate: $('separate'),
   notesLabel: $('notes-label'),
   dropzone: $('dropzone'),
   dropError: $('drop-error'),
@@ -57,21 +74,8 @@ const ui = {
   barDots: $('bar-dots'),
   play: $('play'),
   time: $('time'),
-  musicVolume: $('music-volume'),
-  stemMix: $('stem-mix'),
-  stemVolumes: [...document.querySelectorAll('[data-stem]')],
-  synthVolume: $('synth-volume'),
-  bassVolume: $('bass-volume'),
-  clickVolume: $('click-volume'),
   zoom: $('zoom'),
-  tempoSelect: $('tempo-select'),
-  halfBeat: $('half-beat'),
   speed: $('speed'),
-  vocabulary: $('vocabulary'),
-  power: $('power'),
-  smoothing: $('smoothing'),
-  keyBias: $('key-bias'),
-  meter: $('meter'),
   trDown: $('tr-down'),
   trUp: $('tr-up'),
   trValue: $('tr-value'),
@@ -80,34 +84,72 @@ const ui = {
   progress: $('progress-fill'),
 };
 
-const settings = {
-  // Chords from the full 'mix' or the separated 'harmony' (bass + other), by chord-er's detector, or
-  // by Chordino from either ('chordino-mix', 'chordino-harmony').
-  source: 'mix',
-  slash: true, // split chords where the bass note changes and show it as C/E
+// ---------- Preferences (the sidebar), kept across songs and visits ----------
+
+const STEM_NAMES = ['vocals', 'drums', 'bass', 'other'];
+const channel = (volume) => ({ volume, mute: false, solo: false });
+const DEFAULTS = {
+  source: 'mix', // chords from the full 'mix' or the separated 'harmony' (bass + other)
+  timing: 'free', // chord changes 'free' (where the harmony changes), on the 'beats', or 'auto'
+  tempo: 'steady', // beat grid from a steady-tempo candidate, or 'ai' (Beat This!)
+  beatsPerBar: 4,
+  detector: 'chorder', // 'chorder' or 'chordino'
+  smoothing: 5,
+  keyBias: 5, // slider value; the score bonus for chords that fit the key is × 0.02
+  allowed: { sevenths: true, sus: false, power: true, dim: false, aug: false }, // besides maj/min
+  slash: false, // split chords where the bass note changes and show it as C/E (needs the stems)
   respell: false, // re-spell slash chords rooted on the bass when that gives a familiar chord
   early: true, // start a chord where the bass already moved to it (Bb/D → Dm becomes an early Dm)
   rebuild: false, // experimental: re-read slash chords as in-key chords rooted on the bass
-  timing: 'auto', // chord changes on the 'beats', 'free' (where the harmony changes), or 'auto'
+  mixer: {
+    music: channel(100),
+    click: channel(0),
+    chordSynth: channel(50),
+    bassSynth: channel(50),
+    ...Object.fromEntries(STEM_NAMES.map((name) => [name, channel(100)])),
+  },
+  sections: { setup: true, detector: true, namer: true, mixer: true },
+};
+const PREFS_KEY = 'chord-er-settings';
+
+function loadPrefs() {
+  let saved = {};
+  try {
+    saved = JSON.parse(localStorage.getItem(PREFS_KEY)) ?? {};
+  } catch {
+    // no saved settings, or storage blocked
+  }
+  const merged = { ...structuredClone(DEFAULTS), ...saved };
+  for (const group of ['allowed', 'sections']) merged[group] = { ...DEFAULTS[group], ...saved[group] };
+  merged.mixer = Object.fromEntries(Object.keys(DEFAULTS.mixer).map((c) => [c, { ...DEFAULTS.mixer[c], ...saved.mixer?.[c] }]));
+  return merged;
+}
+
+const prefs = loadPrefs();
+function savePrefs() {
+  try {
+    localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
+  } catch {
+    // not remembered
+  }
+}
+
+// Per-song choices.
+const view = {
   tempo: '0:1', // "<steady-tempo candidate index, or 'ai' for Beat This!>:<tempo multiplier>"
   halfBeat: false,
-  vocabulary: 'sevenths',
-  power: true, // power chords (root + fifth, shown as E5) where no third is heard
-  smoothing: 5,
-  keyBias: 0.1, // score bonus for chords that fit the key (slider value × 0.02)
-  beatsPerBar: 4,
   transpose: 0,
 };
-let analysis = null; // worker output, independent of the settings above; later also .tracked
-// (Beat This! beats), .harmony (chroma of bass + other), .bassStem (analysis of the bass stem)
-// and .drumShare (the drums' share of the instrumental energy)
+
+let analysis = null; // worker output, independent of the settings; later also .tracked (Beat This!
+// beats), .harmony (chroma of bass + other), .bassStem (analysis of the bass stem), .drumShare (the
+// drums' share of the instrumental energy) and .chordino (Chordino's chords per source)
 let stems = null; // the separated stems as 16-bit [left, right], in STEM_NAMES order
-const STEM_NAMES = ['vocals', 'drums', 'bass', 'other'];
 let grid = null; // beat grid and beat-synchronous chroma for the current tempo settings
 let key = null;
 let song = null; // decoded chords with display labels
 // Model workers, kept alive so each model loads once; `busy` holds those mid-job.
-const workers = { beats: null, stems: null };
+const workers = { beats: null, stems: null, chordino: null };
 // Written out literally so Vite bundles each worker for the production build.
 const createWorker = {
   beats: () => new Worker(new URL('./beats/worker.js', import.meta.url), { type: 'module' }),
@@ -116,14 +158,16 @@ const createWorker = {
 };
 const busy = new Set();
 let loadId = 0; // identifies the current song, so results for a replaced song are dropped
-let songFile = null; // the loaded file, decoded again for Chordino
+let songFile = null; // the loaded file, decoded again for the stems and Chordino
+let beatSamples = null; // the mono analysis signal, for Beat This!
+let jobs = {}; // per song: the AI model jobs ('beats', 'stems') asked for or running
+let chordinoRunning = new Set(); // per song: Chordino sources being analyzed
 let objectUrl = null; // the original file
-let mixUrl = null; // the current stem mix, when any stem volume is below 100
+let mixUrl = null; // the current stem mix, when the stems aren't all at full volume
 
-const volumeOf = (slider) => Number(slider.value) / 100;
-const synth = new ChordSynth(volumeOf(ui.synthVolume));
-const bassSynth = new BassSynth(volumeOf(ui.bassVolume));
-const metronome = new Metronome(volumeOf(ui.clickVolume));
+const synth = new ChordSynth(0);
+const bassSynth = new BassSynth(0);
+const metronome = new Metronome(0);
 let audioCtx = null;
 let musicGain = null;
 
@@ -149,28 +193,23 @@ async function loadFile(file) {
   busy.clear();
   try {
     const samples = await decodeToMono(await file.arrayBuffer(), ANALYSIS_SAMPLE_RATE);
-    const beatSamples = samples.slice(); // the analysis worker takes ownership of `samples`
+    beatSamples = samples.slice(); // the analysis worker takes ownership of `samples`
     analysis = await runAnalysis({ samples, sampleRate: ANALYSIS_SAMPLE_RATE }, showProgress);
-    key = null;
-    populateTempoOptions();
-    songFile = file;
     analysis.chordino = {};
-    settings.source = ui.source.value = 'mix';
-    for (const value of ['harmony', 'chordino-harmony']) ui.source.querySelector(`[value=${value}]`).disabled = true;
-    ui.source.parentElement.hidden = false;
-    for (const box of [ui.slash, ui.respell, ui.early, ui.rebuild]) {
-      box.disabled = true;
-      box.parentElement.hidden = false;
-    }
-    ui.timing.parentElement.hidden = false;
+    songFile = file;
+    key = null;
     stems = null;
-    ui.stemMix.hidden = true;
-    for (const slider of ui.stemVolumes) slider.value = 100;
+    jobs = {};
+    chordinoRunning = new Set();
+    showStatus(null);
+    populateTempoOptions();
+    showStemRows();
 
     if (objectUrl) URL.revokeObjectURL(objectUrl);
     if (mixUrl) URL.revokeObjectURL(mixUrl);
     objectUrl = URL.createObjectURL(file);
     mixUrl = null;
+    appliedStemGains = '';
     audio.src = objectUrl;
     audio.playbackRate = Number(ui.speed.value);
     ui.title.textContent = file.name.replace(/\.[^.]+$/, '');
@@ -178,7 +217,7 @@ async function loadFile(file) {
     ui.player.hidden = false;
     refresh();
     seek(0);
-    enhance(file, beatSamples, id);
+    requestModels();
   } catch (err) {
     console.error(err);
     ui.dropError.textContent = `Could not analyze “${file.name}”: ${err.message || err}`;
@@ -223,107 +262,124 @@ async function runModel(name, message, transfer) {
   }
 }
 
-const CONSENT_KEY = 'chord-er-models-consent';
-let consentPrompt = null; // the open dialog's answer, shared by everyone waiting on it
-let declined = false; // "Not now" this session: don't ask again on every song
+// ---------- AI models, on demand ----------
 
-// True when the AI models may be used: they are already cached, the user agreed before, or the
-// user agrees now. Asks with a dialog before the first download; after "Not now", only when
-// `ask` is set (the user clicked the button).
-async function modelsAllowed(ask = !declined) {
-  try {
-    if (localStorage.getItem(CONSENT_KEY) === 'yes') return true;
-  } catch {
-    // storage blocked: just ask
-  }
-  if (await modelsCached()) return true;
-  if (!ask) return false;
-  if (!consentPrompt) {
-    consentPrompt = new Promise((resolve) =>
-      ui.modelDialog.addEventListener(
-        'close',
-        () => {
-          consentPrompt = null;
-          resolve(ui.modelDialog.returnValue);
-        },
-        { once: true },
-      ),
-    );
-    ui.modelDialog.showModal();
-  }
-  const answer = await consentPrompt;
-  declined = answer !== 'download';
-  if (declined) return false;
-  try {
-    localStorage.setItem(CONSENT_KEY, 'yes');
-  } catch {
-    // not remembered; the cached models skip the question next time anyway
-  }
-  return true;
-}
+const MODELS = {
+  beats: {
+    urls: [BEAT_FRONTEND_URL, BEAT_MODEL_URL],
+    title: 'Download the beat tracking model?',
+    purpose: 'Beat This! (82 MB) follows tempo changes and finds the bars, for the Beat This! tempo.',
+    size: '82 MB',
+  },
+  stems: {
+    urls: [SEPARATION_MODEL_URL],
+    title: 'Download the stem separation model?',
+    purpose:
+      'HTDemucs (166 MB) splits the song into vocals, drums, bass and other instruments. It is needed for chords from the harmony, slash chords and the stem mixer.',
+    size: '166 MB',
+  },
+};
 
-async function modelsCached() {
+// The settings that need each model, and how to turn them back off when its download is declined.
+const needs = {
+  beats: () => prefs.tempo === 'ai',
+  stems: () => prefs.source === 'harmony' || prefs.slash,
+};
+const decline = {
+  beats: () => {
+    prefs.tempo = 'steady';
+    view.tempo = '0:1';
+  },
+  stems: () => {
+    prefs.source = 'mix';
+    prefs.slash = false;
+  },
+};
+
+async function modelCached(kind) {
   try {
     const cache = await caches.open(MODEL_CACHE);
-    const found = await Promise.all(MODEL_URLS.map((url) => cache.match(url)));
-    return found.every(Boolean);
+    return (await Promise.all(MODELS[kind].urls.map((url) => cache.match(url)))).every(Boolean);
   } catch {
     return false;
   }
 }
 
-// Background improvements once the song is playable: Beat This! beats (seconds), then the
-// stem separation (tens of seconds). Each one switches the view over when it is ready. Without
-// the user's go-ahead for the model download, the basic analysis stays and a button offers it.
-async function enhance(file, beatSamples, id, ask) {
-  ui.enableModels.hidden = true;
-  if (!(await modelsAllowed(ask))) {
-    if (id === loadId) {
-      ui.enableModels.hidden = false;
-      ui.enableModels.onclick = () => enhance(file, beatSamples, id, true);
-    }
+// True when the model is cached, or the user agrees to download it now. One question at a time.
+let prompts = Promise.resolve();
+function modelAllowed(kind) {
+  const answer = prompts.then(async () => {
+    if (await modelCached(kind)) return true;
+    const { title, purpose, size } = MODELS[kind];
+    ui.modelTitle.textContent = title;
+    ui.modelPurpose.textContent = purpose;
+    ui.modelDownload.textContent = `Download (${size})`;
+    ui.modelDialog.showModal();
+    await new Promise((resolve) => ui.modelDialog.addEventListener('close', resolve, { once: true }));
+    return ui.modelDialog.returnValue === 'download';
+  });
+  prompts = answer.catch(() => {});
+  return answer;
+}
+
+// The model jobs run one after the other.
+let jobQueue = Promise.resolve();
+
+// Starts the model `kind` for the current song once allowed; when the download is declined, the
+// settings that needed it are turned off.
+async function requestModel(kind, onDecline = decline[kind]) {
+  const id = loadId;
+  if (!analysis || jobs[kind]) return;
+  jobs[kind] = 'asking';
+  if (!(await modelAllowed(kind))) {
+    if (id === loadId) jobs[kind] = null;
+    onDecline();
+    savePrefs();
+    syncControls();
+    refresh();
     return;
   }
   if (id !== loadId) return;
-  let failed = null;
-  try {
-    await trackBeats(beatSamples.slice(), id);
-  } catch (err) {
-    if (id !== loadId) return;
-    console.error(err);
-    failed = `Beat tracking failed: ${err.message || err}`;
-  }
-  try {
-    await separateHarmony(file, id);
-  } catch (err) {
-    if (id !== loadId) return;
-    console.error(err);
-    failed = `Stem separation failed: ${err.message || err}`;
-  }
-  if (id === loadId) showStatus(failed);
+  const run = kind === 'beats' ? trackBeats : separateHarmony;
+  jobs[kind] = jobQueue = jobQueue.then(() =>
+    run(id).catch((err) => {
+      if (id !== loadId) return;
+      console.error(err);
+      jobs[kind] = null;
+      showStatus(`${kind === 'beats' ? 'Beat tracking' : 'Stem separation'} failed: ${err.message || err}`);
+    }),
+  );
 }
 
-// Beat This! follows tempo changes and finds the downbeats; it becomes the default grid.
-async function trackBeats(samples, id) {
+function requestModels() {
+  for (const kind of ['beats', 'stems']) if (needs[kind]()) requestModel(kind);
+}
+
+// Beat This! follows tempo changes and finds the downbeats.
+async function trackBeats(id) {
+  if (id !== loadId) return;
   showStatus('Loading beat model', 0);
+  const samples = beatSamples.slice();
   const { beats, downbeats } = await runModel('beats', { samples }, [samples.buffer]);
   if (id !== loadId) return;
   analysis.tracked = { times: beats, downbeats };
+  showStatus(null);
   populateTempoOptions();
   refresh();
 }
 
 // Separates the four stems, then analyzes the harmony (bass + other: no vocals, no drums) for the
-// chords and the bass stem alone for the bass line, and switches over to them. The drums only tell
-// whether the song has a beat to follow. Tempo stays on the full mix. All four stems are kept for
-// the stem volume sliders.
-async function separateHarmony(file, id) {
+// chords and the bass stem alone for the bass line. The drums only tell whether the song has a
+// beat to follow. Tempo stays on the full mix. All four stems are kept for the mixer.
+async function separateHarmony(id) {
+  if (id !== loadId) return;
+  const file = songFile;
   showStatus('Preparing stem separation', 0);
   // In development, a song's stems are reused from earlier runs (see devStemCache.js).
   let stored = import.meta.env.DEV ? await loadStems(file, STEM_NAMES.length) : null;
   let separated;
   if (stored) {
-    separated = stored.map((stem) => stem.map((channel) => Float32Array.from(channel, (v) => v / 32767)));
+    separated = stored.map((stem) => stem.map((ch) => Float32Array.from(ch, (v) => v / 32767)));
   } else {
     const stereo = await decodeToStereo(await file.arrayBuffer(), MODEL_SAMPLE_RATE);
     if (id !== loadId) return;
@@ -337,8 +393,8 @@ async function separateHarmony(file, id) {
   }
   if (id !== loadId) return;
   const [, drums, bass, other] = separated;
-  const harmony = bass.map((channel, c) => channel.map((v, i) => v + other[c][i]));
-  const energy = (stem) => stem.reduce((sum, channel) => sum + channel.reduce((s, v) => s + v * v, 0), 0);
+  const harmony = bass.map((ch, c) => ch.map((v, i) => v + other[c][i]));
+  const energy = (stem) => stem.reduce((sum, ch) => sum + ch.reduce((s, v) => s + v * v, 0), 0);
   const drumEnergy = energy(drums);
   analysis.drumShare = drumEnergy / (drumEnergy + energy(harmony) || 1);
   const analyze = async (stereoStem) =>
@@ -350,19 +406,30 @@ async function separateHarmony(file, id) {
   const bassFrames = await analyze(bass);
   if (id !== loadId) return;
   stems = stored;
-  ui.stemMix.hidden = false;
   analysis.harmony = harmonyFrames;
   analysis.bassStem = bassFrames;
-  for (const value of ['harmony', 'chordino-harmony']) ui.source.querySelector(`[value=${value}]`).disabled = false;
-  ui.slash.disabled = ui.early.disabled = false;
-  ui.respell.disabled = ui.rebuild.disabled = !ui.slash.checked;
-  if (!settings.source.startsWith('chordino')) settings.source = ui.source.value = 'harmony';
+  showStatus(null);
+  showStemRows();
+  applyMixer();
   key = null;
   refresh();
 }
 
-// Chordino's chords for the full mix or the harmony stems, computed when first chosen.
+// ---------- Chordino ----------
+
 const CHORDINO_RATE = 44100;
+// Chordino analyzes the harmony once the stems are there, else the full mix.
+const chordinoSource = () => (prefs.source === 'harmony' && stems ? 'harmony' : 'mix');
+
+// Starts Chordino for the current source when it is the chosen detector and hasn't run yet.
+function ensureChordino() {
+  if (prefs.detector !== 'chordino' || !analysis) return;
+  const which = chordinoSource();
+  if (analysis.chordino[which] || chordinoRunning.has(which)) return;
+  chordinoRunning.add(which);
+  runChordino(which);
+}
+
 async function runChordino(which) {
   const id = loadId;
   showStatus('Running Chordino');
@@ -374,7 +441,7 @@ async function runChordino(which) {
       const [, , bass, other] = stems;
       samples = new Float32Array(bass[0].length);
       for (const stem of [bass, other]) {
-        for (const channel of stem) for (let i = 0; i < samples.length; i++) samples[i] += channel[i] / (2 * 32767);
+        for (const ch of stem) for (let i = 0; i < samples.length; i++) samples[i] += ch[i] / (2 * 32767);
       }
     }
     const { chords } = await runModel('chordino', { samples, sampleRate: CHORDINO_RATE }, [samples.buffer]);
@@ -412,20 +479,17 @@ function showProgress(stage, value) {
   ui.progress.style.width = `${Math.round(value * 100)}%`;
 }
 
-// Beat This! beats (when ready) at ½, ×1 and ×2, then the steady-tempo candidates: the
-// detected tempo, its double and half, and the others, slowest first.
+// Beat This! (its beats at ½, ×1 and ×2 once tracked, else one entry that runs it), then the
+// steady-tempo candidates: the detected tempo, its double and half, and the others, slowest first.
 function populateTempoOptions() {
   const { tempoCandidates: candidates, tracked } = analysis;
-  const groups = [];
+  const ai = document.createElement('optgroup');
+  ai.label = 'Beat This! (AI, follows tempo changes)';
   if (tracked) {
     const bpm = medianBpm(tracked.times);
-    const group = document.createElement('optgroup');
-    group.label = 'Beat This! (follows tempo changes)';
-    group.append(
-      ...[0.5, 1, 2].map((mult) => new Option(`${Math.round(bpm * mult)} BPM${mult === 1 ? ' (detected)' : ''}`, `ai:${mult}`)),
-    );
-    groups.push(group);
-  }
+    ai.append(...[0.5, 1, 2].map((mult) => new Option(`${Math.round(bpm * mult)} BPM${mult === 1 ? ' (detected)' : ''}`, `ai:${mult}`)));
+  } else ai.append(new Option('Beat This!', 'ai:1'));
+
   const options = [];
   const add = (i, mult) => {
     const bpm = candidates[i].bpm * mult;
@@ -438,14 +502,11 @@ function populateTempoOptions() {
   options.sort((a, b) => a.bpm - b.bpm);
   const steady = document.createElement('optgroup');
   steady.label = 'Steady tempo';
-  steady.append(
-    ...options.map(({ value, bpm }) => new Option(`${Math.round(bpm)} BPM${!tracked && value === '0:1' ? ' (detected)' : ''}`, value)),
-  );
+  steady.append(...options.map(({ value, bpm }) => new Option(`${Math.round(bpm)} BPM${value === '0:1' ? ' (detected)' : ''}`, value)));
   if (!options.length) steady.append(new Option('120 BPM (no clear beat)', '0:1'));
-  groups.push(steady);
-  ui.tempoSelect.replaceChildren(...groups);
-  settings.tempo = ui.tempoSelect.value = tracked ? 'ai:1' : '0:1';
-  settings.halfBeat = ui.halfBeat.checked = false;
+  ui.tempoSelect.replaceChildren(ai, steady);
+  view.tempo = ui.tempoSelect.value = prefs.tempo === 'ai' ? 'ai:1' : '0:1';
+  view.halfBeat = ui.halfBeat.checked = false;
 }
 
 // Median tempo of a list of beat times.
@@ -469,60 +530,66 @@ function tempoText(beats) {
 // on every slider move.
 function refresh() {
   if (!analysis) return;
+  ensureChordino();
   const { duration, tempoCandidates, tracked } = analysis;
-  const [index, multiplier] = settings.tempo.split(':');
-  const mult = Number(multiplier);
+  // Until Beat This! has run, its choice shows the detected steady tempo.
+  const [index, multiplier] = (view.tempo.startsWith('ai') && !tracked ? '0:1' : view.tempo).split(':');
   const beatSource = index === 'ai' ? tracked : (tempoCandidates[Number(index)] ?? null);
-  const { beats, downbeats } = buildBeats(beatSource, { mult, half: settings.halfBeat }, duration);
-  const fromHarmony = settings.source === 'harmony' || settings.source === 'chordino-harmony';
-  const frames = fromHarmony && analysis.harmony ? analysis.harmony : analysis;
+  const { beats, downbeats } = buildBeats(beatSource, { mult: Number(multiplier), half: view.halfBeat }, duration);
+  const frames = prefs.source === 'harmony' && analysis.harmony ? analysis.harmony : analysis;
   grid = { duration, beats, downbeats, ...beatSync(beats, duration, frames, analysis.bassStem ?? frames) };
   key ??= detectKey(grid);
 
   // The beat grid always gives the bars; the chords come from it too, or, with free timing, from
   // a plain time grid so they change wherever the harmony does.
-  let { chords, bars } = decodeChords(grid, key, settings);
+  const decoding = {
+    vocabulary: vocabularyFor(prefs.allowed),
+    smoothing: prefs.smoothing,
+    beatsPerBar: prefs.beatsPerBar,
+    keyBias: prefs.keyBias * 0.02,
+  };
+  let { chords, bars } = decodeChords(grid, key, decoding);
   const free = chordTimingIsFree();
   const bassFrames = analysis.bassStem ?? frames;
   let chordGrid = grid;
   if (free) {
     const slots = timeSlots(duration);
     chordGrid = { duration, beats: slots, downbeats: null, uniform: true, ...beatSync(slots, duration, frames, bassFrames) };
-    ({ chords } = decodeChords(chordGrid, key, settings));
+    ({ chords } = decodeChords(chordGrid, key, decoding));
   }
-  // Chordino's chords are shown as it labels them, with its own timing and slash chords.
-  const chordino = settings.source.startsWith('chordino') ? analysis.chordino[settings.source.slice('chordino-'.length)] : null;
+
+  // Chordino's chords keep its own timing and slash chords; their qualities are reduced to the
+  // allowed ones. Until it has run, chord-er's chords show.
+  const chordino = prefs.detector === 'chordino' ? analysis.chordino[chordinoSource()] : null;
   let pieces;
   if (chordino) {
-    pieces = chordinoPieces(chordino, duration);
-    song = { bass: pieces.map((p) => ({ start: p.start, pc: p.bass >= 0 ? p.bass : p.root })) };
-    if (!settings.slash) pieces = pieces.map((p) => ({ ...p, bass: -1 }));
+    pieces = chordinoPieces(chordino, duration).map((p) => ({ ...p, quality: allowedQuality(p.quality, prefs.allowed) }));
   } else {
-    if (settings.power) chords = markPowerChords(chords, chordGrid);
+    if (prefs.allowed.power) chords = markPowerChords(chords, chordGrid);
     // Pieces of constant chord and bass note. The bass line needs the bass stem: in the full mix
     // the kick drum reads as bass notes.
-    const detectedBass = analysis.bassStem ? decodeBassLine(chordGrid, settings.smoothing) : null;
+    const detectedBass = analysis.bassStem ? decodeBassLine(chordGrid, prefs.smoothing) : null;
     pieces = detectedBass ? splitByBass(chords, detectedBass, chordGrid.beats) : chords.map((c) => ({ ...c, bass: -1 }));
     if (free) pieces = refineChanges(pieces, frames, bassFrames);
     const beatLength = 60 / medianBpm(beats);
-    if (detectedBass && settings.early) pieces = anticipateChanges(pieces, beatLength);
-    pieces = dropShortSlashes(pieces, settings.smoothing, beatLength);
-    // The bass synth plays each piece's bass note (the root where the bass is unclear).
-    song = { bass: pieces.map((p) => ({ start: p.start, pc: p.bass >= 0 ? p.bass : p.root })) };
-    if (!settings.slash) pieces = pieces.map((p) => ({ ...p, bass: -1 }));
-    else {
-      if (settings.respell) pieces = pieces.map(respellSlash);
-      if (settings.rebuild) pieces = rebuildOnBass(pieces, chordGrid, key);
-    }
+    if (detectedBass && prefs.slash && prefs.early) pieces = anticipateChanges(pieces, beatLength);
+    pieces = dropShortSlashes(pieces, prefs.smoothing, beatLength);
+  }
+  // The bass synth plays each piece's bass note (the root where the bass is unclear).
+  song = { bass: pieces.map((p) => ({ start: p.start, pc: p.bass >= 0 ? p.bass : p.root })) };
+  if (!prefs.slash) pieces = pieces.map((p) => ({ ...p, bass: -1 }));
+  else {
+    if (prefs.respell) pieces = pieces.map(respellSlash);
+    if (prefs.rebuild && !chordino) pieces = rebuildOnBass(pieces, chordGrid, key);
   }
   pieces = mergeSameChord(pieces);
 
-  const shownKey = transposeKey(key, settings.transpose);
+  const shownKey = transposeKey(key, view.transpose);
   Object.assign(song, {
     bars,
     chords: pieces.map((c) => {
-      const root = transposeRoot(c.root, settings.transpose);
-      const bass = transposeRoot(c.bass ?? -1, settings.transpose);
+      const root = transposeRoot(c.root, view.transpose);
+      const bass = transposeRoot(c.bass ?? -1, view.transpose);
       // The synth and note graph use the untransposed chord so it can be checked against the recording.
       return {
         ...c,
@@ -553,7 +620,7 @@ function refresh() {
   ui.meter.disabled = !!downbeats;
   ui.meter.title = downbeats ? 'Bars come from the downbeats Beat This! found' : '';
   ui.key.hidden = ui.tempo.hidden = false;
-  ui.trValue.textContent = settings.transpose > 0 ? `+${settings.transpose}` : String(settings.transpose);
+  ui.trValue.textContent = view.transpose > 0 ? `+${view.transpose}` : String(view.transpose);
   shown = {};
   resetSchedule();
 }
@@ -561,7 +628,7 @@ function refresh() {
 // Free chord timing when chosen, or automatically for songs (nearly) without drums, whose beat
 // grid is unreliable. Until the stems are separated, the drums' share is unknown: beats.
 function chordTimingIsFree() {
-  if (settings.timing !== 'auto') return settings.timing === 'free';
+  if (prefs.timing !== 'auto') return prefs.timing === 'free';
   return analysis.drumShare !== undefined && analysis.drumShare < 0.05;
 }
 
@@ -576,6 +643,51 @@ function mergeSameChord(pieces) {
   return out;
 }
 
+// ---------- Mixer ----------
+
+// The volume each channel actually plays at (0–1), after mute and solo. Soloing a stem keeps the
+// music channel on, playing only the soloed stems.
+function audibleGains() {
+  const m = prefs.mixer;
+  const stemSolo = !!stems && STEM_NAMES.some((name) => m[name].solo);
+  const anySolo = stemSolo || ['music', 'click', 'chordSynth', 'bassSynth'].some((c) => m[c].solo);
+  const on = (c) => !m[c].mute && (!anySolo || m[c].solo || (c === 'music' && stemSolo));
+  const level = (c) => (on(c) ? m[c].volume / 100 : 0);
+  return {
+    music: level('music'),
+    click: level('click'),
+    chordSynth: level('chordSynth'),
+    bassSynth: level('bassSynth'),
+    stems: STEM_NAMES.map((name) => (!m[name].mute && (!stemSolo || m[name].solo) ? m[name].volume / 100 : 0)),
+  };
+}
+
+let appliedStemGains = ''; // the stem gains the playing audio was mixed with
+let stemMixTimer = 0;
+function applyMixer() {
+  const gains = audibleGains();
+  metronome.setVolume(gains.click);
+  synth.setVolume(gains.chordSynth);
+  bassSynth.setVolume(gains.bassSynth);
+  if (musicGain) musicGain.gain.setTargetAtTime(gains.music, audioCtx.currentTime, 0.02);
+  for (const row of ui.mixRows) {
+    const c = prefs.mixer[row.dataset.channel];
+    row.querySelector('[data-mute]').classList.toggle('on', c.mute);
+    row.querySelector('[data-solo]').classList.toggle('on', c.solo);
+  }
+  // Remixing briefly reloads the song, so wait until the controls rest. Silent music needs none.
+  if (stems && gains.music > 0 && gains.stems.join() !== appliedStemGains) {
+    clearTimeout(stemMixTimer);
+    stemMixTimer = setTimeout(() => applyStemMix(gains.stems), 250);
+  }
+}
+
+function showStemRows() {
+  ui.stemRows.hidden = !stems;
+  ui.stemsMissing.hidden = !!stems;
+  ui.separate.disabled = !analysis;
+}
+
 // ---------- Playback ----------
 
 function seek(t) {
@@ -587,15 +699,13 @@ function seek(t) {
   timeline.setTime(clamped);
 }
 
-// Plays the stems mixed at the slider volumes, or the original file when all are at 100.
+// Plays the stems mixed at these gains, or the original file when all are at full volume.
 let mixToken = 0;
-async function applyStemMix() {
+async function applyStemMix(gains) {
   const token = ++mixToken;
-  const gains = ui.stemVolumes.map(volumeOf);
+  appliedStemGains = gains.join();
   let url = objectUrl;
-  if (gains.some((g) => g < 1)) {
-    url = URL.createObjectURL(mixToWav(stems, gains, MODEL_SAMPLE_RATE));
-  }
+  if (gains.some((g) => g < 1)) url = URL.createObjectURL(mixToWav(stems, gains, MODEL_SAMPLE_RATE));
   if (token !== mixToken) return URL.revokeObjectURL(url);
   const time = audio.currentTime;
   const playing = !audio.paused;
@@ -694,7 +804,7 @@ function startAudio() {
   if (!audioCtx) {
     audioCtx = new AudioContext({ latencyHint: 'interactive' });
     musicGain = audioCtx.createGain();
-    musicGain.gain.value = volumeOf(ui.musicVolume);
+    musicGain.gain.value = audibleGains().music;
     audioCtx.createMediaElementSource(audio).connect(musicGain).connect(audioCtx.destination);
     synth.attach(audioCtx);
     bassSynth.attach(audioCtx);
@@ -781,111 +891,135 @@ audio.addEventListener('pause', () => (ui.play.textContent = '▶'));
 
 // ---------- Controls ----------
 
+// Shows the preferences in the sidebar.
+function syncControls() {
+  ui.source.value = prefs.source;
+  ui.timing.value = prefs.timing;
+  ui.meter.value = prefs.beatsPerBar;
+  if (analysis) ui.tempoSelect.value = view.tempo;
+  ui.detector.value = prefs.detector;
+  ui.chorderOptions.hidden = prefs.detector !== 'chorder';
+  ui.smoothing.value = prefs.smoothing;
+  ui.keyBias.value = prefs.keyBias;
+  for (const box of ui.allow) box.checked = prefs.allowed[box.dataset.allow];
+  ui.slash.checked = prefs.slash;
+  ui.respell.checked = prefs.respell;
+  ui.early.checked = prefs.early;
+  ui.rebuild.checked = prefs.rebuild;
+  ui.respell.disabled = !prefs.slash;
+  // Early changes and rebuilding work on chord-er's own chords.
+  ui.early.disabled = ui.rebuild.disabled = !prefs.slash || prefs.detector !== 'chorder';
+  for (const row of ui.mixRows) row.querySelector('input').value = prefs.mixer[row.dataset.channel].volume;
+  for (const section of ui.sections) section.open = prefs.sections[section.dataset.section];
+}
+
+// A preference changed: remember it, then redraw (`rekey`: the key may change too).
+function changed({ rekey = false } = {}) {
+  savePrefs();
+  syncControls();
+  if (rekey) key = null;
+  refresh();
+  requestModels();
+}
+
 ui.file.addEventListener('change', () => {
   loadFile(ui.file.files[0]);
   ui.file.value = '';
 });
 ui.play.addEventListener('click', togglePlay);
-ui.musicVolume.addEventListener('input', () => {
-  startAudio();
-  musicGain.gain.setTargetAtTime(volumeOf(ui.musicVolume), audioCtx.currentTime, 0.02);
+
+ui.source.addEventListener('change', () => {
+  prefs.source = ui.source.value;
+  changed({ rekey: true });
 });
-// Remixing takes a moment and briefly reloads the song, so wait until the slider rests.
-let stemMixTimer = 0;
-for (const slider of ui.stemVolumes) {
-  slider.addEventListener('input', () => {
-    clearTimeout(stemMixTimer);
-    stemMixTimer = setTimeout(() => stems && applyStemMix(), 250);
+ui.timing.addEventListener('change', () => {
+  prefs.timing = ui.timing.value;
+  changed();
+});
+ui.tempoSelect.addEventListener('change', () => {
+  view.tempo = ui.tempoSelect.value;
+  prefs.tempo = view.tempo.startsWith('ai') ? 'ai' : 'steady';
+  changed();
+});
+ui.halfBeat.addEventListener('change', () => {
+  view.halfBeat = ui.halfBeat.checked;
+  refresh();
+});
+ui.meter.addEventListener('change', () => {
+  prefs.beatsPerBar = Number(ui.meter.value);
+  changed();
+});
+ui.detector.addEventListener('change', () => {
+  prefs.detector = ui.detector.value;
+  changed();
+});
+ui.smoothing.addEventListener('input', () => {
+  prefs.smoothing = Number(ui.smoothing.value);
+  changed();
+});
+ui.keyBias.addEventListener('input', () => {
+  prefs.keyBias = Number(ui.keyBias.value);
+  changed();
+});
+for (const box of ui.allow) {
+  box.addEventListener('change', () => {
+    prefs.allowed[box.dataset.allow] = box.checked;
+    changed();
   });
 }
-ui.bassVolume.addEventListener('input', () => {
-  startAudio();
-  bassSynth.setVolume(volumeOf(ui.bassVolume));
-});
-ui.synthVolume.addEventListener('input', () => {
-  startAudio();
-  synth.setVolume(volumeOf(ui.synthVolume));
-});
-ui.clickVolume.addEventListener('input', () => {
-  startAudio();
-  metronome.setVolume(volumeOf(ui.clickVolume));
-});
+for (const name of ['slash', 'respell', 'early', 'rebuild']) {
+  ui[name].addEventListener('change', () => {
+    prefs[name] = ui[name].checked;
+    changed();
+  });
+}
+for (const section of ui.sections) {
+  section.addEventListener('toggle', () => {
+    prefs.sections[section.dataset.section] = section.open;
+    savePrefs();
+  });
+}
+
+for (const row of ui.mixRows) {
+  const c = prefs.mixer[row.dataset.channel];
+  row.querySelector('input').addEventListener('input', (e) => {
+    startAudio();
+    c.volume = Number(e.target.value);
+    savePrefs();
+    applyMixer();
+  });
+  for (const flag of ['mute', 'solo']) {
+    row.querySelector(`[data-${flag}]`).addEventListener('click', () => {
+      startAudio();
+      c[flag] = !c[flag];
+      savePrefs();
+      applyMixer();
+    });
+  }
+}
+ui.separate.addEventListener('click', () => requestModel('stems', () => {}));
+
 ui.zoom.addEventListener('input', () => timeline.setZoom(Number(ui.zoom.value)));
 ui.speed.addEventListener('change', () => {
   audio.playbackRate = Number(ui.speed.value);
   resetSchedule();
-});
-ui.timing.addEventListener('change', () => {
-  settings.timing = ui.timing.value;
-  refresh();
-});
-ui.slash.addEventListener('change', () => {
-  settings.slash = ui.slash.checked;
-  ui.respell.disabled = ui.rebuild.disabled = !ui.slash.checked;
-  refresh();
-});
-ui.rebuild.addEventListener('change', () => {
-  settings.rebuild = ui.rebuild.checked;
-  refresh();
-});
-ui.early.addEventListener('change', () => {
-  settings.early = ui.early.checked;
-  refresh();
-});
-ui.respell.addEventListener('change', () => {
-  settings.respell = ui.respell.checked;
-  refresh();
-});
-ui.source.addEventListener('change', () => {
-  settings.source = ui.source.value;
-  key = null;
-  refresh();
-  const which = settings.source.startsWith('chordino') ? settings.source.slice('chordino-'.length) : null;
-  if (which && !analysis.chordino[which]) runChordino(which);
-});
-ui.tempoSelect.addEventListener('change', () => {
-  settings.tempo = ui.tempoSelect.value;
-  refresh();
-});
-ui.halfBeat.addEventListener('change', () => {
-  settings.halfBeat = ui.halfBeat.checked;
-  refresh();
-});
-ui.power.addEventListener('change', () => {
-  settings.power = ui.power.checked;
-  refresh();
-});
-ui.vocabulary.addEventListener('change', () => {
-  settings.vocabulary = ui.vocabulary.value;
-  refresh();
-});
-ui.smoothing.addEventListener('input', () => {
-  settings.smoothing = Number(ui.smoothing.value);
-  refresh();
-});
-ui.keyBias.addEventListener('input', () => {
-  settings.keyBias = Number(ui.keyBias.value) * 0.02;
-  refresh();
-});
-ui.meter.addEventListener('change', () => {
-  settings.beatsPerBar = Number(ui.meter.value);
-  refresh();
 });
 for (const [button, delta] of [
   [ui.trDown, -1],
   [ui.trUp, 1],
 ]) {
   button.addEventListener('click', () => {
-    settings.transpose = Math.max(-11, Math.min(11, settings.transpose + delta));
+    view.transpose = Math.max(-11, Math.min(11, view.transpose + delta));
     refresh();
   });
 }
 
 window.addEventListener('keydown', (e) => {
   if (e.code === 'Space') {
+    if (e.target instanceof HTMLInputElement && e.target.type !== 'range' && e.target.type !== 'checkbox') return;
     e.preventDefault();
-    // Blur first so the keyup doesn't also "click" a focused button.
-    if (document.activeElement instanceof HTMLButtonElement) document.activeElement.blur();
+    // Blur first so the keyup doesn't also "click" a focused button or toggle a checkbox.
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
     togglePlay();
   } else if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {
     if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
@@ -912,3 +1046,7 @@ window.addEventListener('drop', (e) => {
   document.body.classList.remove('dragging');
   loadFile(e.dataTransfer.files[0]);
 });
+
+syncControls();
+showStemRows();
+applyMixer();

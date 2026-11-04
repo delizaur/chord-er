@@ -10,15 +10,15 @@ export const QUALITIES = {
   m7: { suffix: 'm7', intervals: [0, 3, 7, 10], penalty: 0.03 },
   dim: { suffix: 'dim', intervals: [0, 3, 6], penalty: 0.05 },
   sus4: { suffix: 'sus4', intervals: [0, 5, 7], penalty: 0.05 },
+  sus2: { suffix: 'sus2', intervals: [0, 2, 7], penalty: 0.05 },
+  aug: { suffix: 'aug', intervals: [0, 4, 8], penalty: 0.05 },
   // Power chord (root and fifth, no third): a major or minor chord is relabeled when its third
   // isn't heard, by markPowerChords.
   5: { suffix: '5', intervals: [0, 7] },
   // Only reached by re-spelling slash chords, never detected directly.
-  sus2: { suffix: 'sus2', intervals: [0, 2, 7] },
   6: { suffix: '6', intervals: [0, 4, 7, 9] },
   m9: { suffix: 'm9', intervals: [0, 3, 7, 10, 14] },
   // Only in Chordino's output.
-  aug: { suffix: 'aug', intervals: [0, 4, 8] },
   m6: { suffix: 'm6', intervals: [0, 3, 7, 9] },
   m7b5: { suffix: 'm7b5', intervals: [0, 3, 6, 10] },
 };
@@ -43,11 +43,24 @@ export function parseChordLabel(label) {
 // reachable from a maj7 over its 6th (Dbmaj7/Bb → Bbm9).
 const RESPELL_QUALITIES = ['maj', 'min', 'maj7', 'm7', '7', 'dim', 'sus4', 'sus2', '6', 'm9'];
 
-export const VOCABULARIES = {
-  basic: ['maj', 'min'],
-  sevenths: ['maj', 'min', '7', 'maj7', 'm7'],
-  full: ['maj', 'min', '7', 'maj7', 'm7', 'dim', 'sus4'],
-};
+// The chord groups the user can allow on top of major and minor (power chords are relabeled
+// triads, see markPowerChords).
+const CHORD_GROUPS = { sevenths: ['7', 'maj7', 'm7'], sus: ['sus2', 'sus4'], dim: ['dim'], aug: ['aug'] };
+
+// The qualities the decoder may choose, for `allowed` = { sevenths, sus, dim, aug } (booleans).
+export function vocabularyFor(allowed) {
+  return ['maj', 'min', ...Object.entries(CHORD_GROUPS).flatMap(([group, qualities]) => (allowed[group] ? qualities : []))];
+}
+
+// The closest allowed quality, for chords another detector (Chordino) found: extended chords fall
+// back to their triad (sixths count as sevenths here), m7b5 to dim or minor, dim to minor and aug
+// to major.
+export function allowedQuality(quality, allowed) {
+  if (quality === 'N' || vocabularyFor(allowed).includes(quality)) return quality;
+  if (quality === '6' || quality === 'm6') return allowed.sevenths ? quality : quality === '6' ? 'maj' : 'min';
+  if (quality === 'm7b5') return allowed.sevenths && allowed.dim ? quality : allowed.dim ? 'dim' : 'min';
+  return { 7: 'maj', maj7: 'maj', m7: 'min', dim: 'min', aug: 'maj', sus2: 'maj', sus4: 'maj' }[quality] ?? quality;
+}
 
 const KAPPA = 10; // emission scale: cosine similarity → log-likelihood
 const BASS_WEIGHT = 0.12; // bonus when the bass note is the root (other chord tones: × BASS_TONE)
@@ -84,7 +97,7 @@ function buildStates(vocabulary, key, keyBias) {
     (key.mode === 'minor' ? MINOR_SCALE : MAJOR_SCALE).map((d) => mod12(key.tonic + d)),
   );
   const states = [];
-  for (const quality of VOCABULARIES[vocabulary]) {
+  for (const quality of vocabulary) {
     const { intervals, penalty } = QUALITIES[quality];
     for (let root = 0; root < 12; root++) {
       const inKey = intervals.every((iv) => scale.has(mod12(root + iv)));
@@ -191,6 +204,7 @@ function downbeatPhase(path, beatsPerBar) {
 // downbeats. Returns the chord segments and the bars (see barInfo). A grid with `uniform` set is
 // a plain time grid (see timeSlots): chords may change on any slot at the same cost, and it
 // has no bars.
+// `vocabulary` lists the allowed qualities (see vocabularyFor).
 export function decodeChords(grid, key, { vocabulary, smoothing, beatsPerBar, keyBias = KEY_BIAS }) {
   const { beats, duration } = grid;
   const n = beats.length;

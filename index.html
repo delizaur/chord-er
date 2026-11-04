@@ -17,40 +17,6 @@
       <div id="song-title" class="song-title"></div>
       <div class="meta">
         <span id="status" class="pill status" hidden></span>
-        <button id="enable-models" class="button small-text" hidden>Download AI models</button>
-        <label class="source" hidden title="Detect chords from the full mix, or from the harmony stems (bass + other instruments, without vocals and drums) once they are separated">
-          Chords from
-          <select id="source">
-            <option value="mix">Full mix</option>
-            <option value="harmony" disabled>Harmony (no vocals)</option>
-            <option value="chordino-mix">Chordino (full mix)</option>
-            <option value="chordino-harmony" disabled>Chordino (harmony)</option>
-          </select>
-        </label>
-        <label class="source" hidden title="When chords may change: on the beats, or freely wherever the harmony changes (for songs without a steady beat). Auto chooses free timing for songs with (almost) no drums, once the stems are separated.">
-          Timing
-          <select id="timing">
-            <option value="auto">Auto</option>
-            <option value="beats">On beats</option>
-            <option value="free">Free</option>
-          </select>
-        </label>
-        <label class="source" hidden title="Detect the bass note (from the bass stem, once separated) and show it as a slash chord, e.g. C/E, when it isn't the chord's root">
-          <input id="slash" type="checkbox" checked />
-          Slash chords
-        </label>
-        <label class="source" hidden title="Re-spell a slash chord as the chord rooted on its bass note when that gives a familiar chord (major, minor, 7, maj7, m7, dim, sus4, sus2 or 6, or m9 from a maj7 over its 6th), e.g. F#sus4/B as Bsus2, C/A as Am7 or Dbmaj7/Bb as Bbm9. Others, such as C/B, stay as slash chords.">
-          <input id="respell" type="checkbox" />
-          Re-spell slashes
-        </label>
-        <label class="source" hidden title="When the bass moves to the next chord's root up to 2 beats before the harmony changes (Bb/D → Dm), start that chord where the bass moved instead of showing a short slash chord. Common with syncopated changes ahead of the downbeat. Turn it off for songs where the bass really moves under a held chord.">
-          <input id="early" type="checkbox" checked />
-          Early changes
-        </label>
-        <label class="source" hidden title="Experimental: re-read a slash chord X/Y as a chord built on its bass note Y that fits the key, when the audio supports it nearly as well, counting quieter notes too (Bm7/F# in B minor → F#m7 when C# and E are there). Slash chords where that is a stretch stay as they are.">
-          <input id="rebuild" type="checkbox" />
-          Rebuild on bass
-        </label>
         <span id="key" class="pill" hidden></span>
         <span id="tempo" class="pill" hidden></span>
       </div>
@@ -60,130 +26,228 @@
       </label>
     </header>
 
-    <main>
-      <section id="dropzone" class="dropzone">
-        <div class="drop-card">
-          <div class="drop-icon">♪</div>
-          <h1>Drop an MP3 to see its chords</h1>
-          <p>or use <strong>Open audio</strong> above.</p>
-          <p class="hint">Analysis runs entirely in your browser — the audio never leaves this computer.</p>
-          <p id="drop-error" class="error" hidden></p>
-        </div>
-      </section>
+    <div class="layout">
+      <main>
+        <section id="dropzone" class="dropzone">
+          <div class="drop-card">
+            <div class="drop-icon">♪</div>
+            <h1>Drop an MP3 to see its chords</h1>
+            <p>or use <strong>Open audio</strong> above.</p>
+            <p class="hint">Analysis runs entirely in your browser — the audio never leaves this computer.</p>
+            <p id="drop-error" class="error" hidden></p>
+          </div>
+        </section>
 
-      <section id="player" class="player" hidden>
-        <div class="now-next">
-          <div class="now">
-            <div class="label">Now</div>
-            <div id="now-chord" class="chord-big">–</div>
-            <div id="bar-dots" class="bar-dots"></div>
-          </div>
-          <div class="next">
-            <div class="label">Next</div>
-            <div id="next-chord" class="chord-mid">–</div>
-            <div id="next-in" class="next-in"></div>
-          </div>
-          <div class="notes" title="How strongly each note sounds right now. Notes of the detected chord are highlighted.">
-            <div class="notes-head">
-              <div id="notes-label" class="label">Notes in the audio</div>
-              <div class="legend"><span class="chord">chord</span><span class="bass">bass</span></div>
+        <section id="player" class="player" hidden>
+          <div class="now-next">
+            <div class="now">
+              <div class="label">Now</div>
+              <div id="now-chord" class="chord-big">–</div>
+              <div id="bar-dots" class="bar-dots"></div>
             </div>
-            <canvas id="note-graph"></canvas>
-          </div>
-        </div>
-
-        <div class="timeline-wrap">
-          <canvas id="timeline"></canvas>
-        </div>
-
-        <div class="transport">
-          <div class="group">
-            <button id="play" class="button primary round" title="Play / pause (Space)">▶</button>
-            <span id="time" class="time">0:00 / 0:00</span>
-            <div class="mix">
-              <label title="Volume of the song">
-                Music
-                <input id="music-volume" type="range" min="0" max="100" value="100" />
-              </label>
-              <span id="stem-mix" class="mix" hidden title="Volume of each separated stem. The song briefly reloads after a change.">
-                <label>Vocals <input data-stem="vocals" type="range" min="0" max="100" value="100" /></label>
-                <label>Drums <input data-stem="drums" type="range" min="0" max="100" value="100" /></label>
-                <label>Bass <input data-stem="bass" type="range" min="0" max="100" value="100" /></label>
-                <label>Other <input data-stem="other" type="range" min="0" max="100" value="100" /></label>
-              </span>
-              <label title="Volume of a synth playing the detected chords">
-                Chord synth
-                <input id="synth-volume" type="range" min="0" max="100" value="50" />
-              </label>
-              <label title="Volume of a synth bass playing the detected bass note (the chord roots until the stems are separated)">
-                Bass synth
-                <input id="bass-volume" type="range" min="0" max="100" value="50" />
-              </label>
-              <label title="Volume of a metronome click on every beat of the detected grid (higher on the first beat of each bar)">
-                Click
-                <input id="click-volume" type="range" min="0" max="100" value="0" />
-              </label>
-              <label title="Beat grid tempo: the detected one, its double / half, or another candidate">
-                Tempo
-                <select id="tempo-select"></select>
-              </label>
-              <label title="Move the beat grid by half a beat (when the beats land between the hits)">
-                <input id="half-beat" type="checkbox" />
-                Shift ½ beat
-              </label>
+            <div class="next">
+              <div class="label">Next</div>
+              <div id="next-chord" class="chord-mid">–</div>
+              <div id="next-in" class="next-in"></div>
+            </div>
+            <div class="notes" title="How strongly each note sounds right now. Notes of the detected chord are highlighted.">
+              <div class="notes-head">
+                <div id="notes-label" class="label">Notes in the audio</div>
+                <div class="legend"><span class="chord">chord</span><span class="bass">bass</span></div>
+              </div>
+              <canvas id="note-graph"></canvas>
             </div>
           </div>
 
-          <div class="group controls">
-            <label>
-              Zoom
-              <input id="zoom" type="range" min="30" max="320" value="110" />
-            </label>
-            <label>
-              Speed
-              <select id="speed">
-                <option value="0.5">0.5×</option>
-                <option value="0.75">0.75×</option>
-                <option value="1" selected>1×</option>
+          <div class="timeline-wrap">
+            <canvas id="timeline"></canvas>
+          </div>
+
+          <div class="transport">
+            <div class="group">
+              <button id="play" class="button primary round" title="Play / pause (Space)">▶</button>
+              <span id="time" class="time">0:00 / 0:00</span>
+            </div>
+            <div class="group controls">
+              <label>
+                Zoom
+                <input id="zoom" type="range" min="30" max="320" value="110" />
+              </label>
+              <label>
+                Speed
+                <select id="speed">
+                  <option value="0.5">0.5×</option>
+                  <option value="0.75">0.75×</option>
+                  <option value="1" selected>1×</option>
+                </select>
+              </label>
+              <div class="transpose">
+                <span>Transpose</span>
+                <button id="tr-down" class="button small">−</button>
+                <span id="tr-value" class="tr-value">0</span>
+                <button id="tr-up" class="button small">+</button>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <aside class="sidebar">
+        <details data-section="setup" open>
+          <summary>Song setup</summary>
+          <div class="section">
+            <label class="field" title="Detect chords from the full mix, or from the harmony (bass + other instruments, without vocals and drums). The harmony needs the stem separation AI model.">
+              <span>Chords from</span>
+              <select id="source">
+                <option value="mix">Full mix</option>
+                <option value="harmony">Harmony (no vocals, AI)</option>
               </select>
             </label>
-            <label>
-              Chords
-              <select id="vocabulary">
-                <option value="basic">Major / minor</option>
-                <option value="sevenths" selected>+ sevenths</option>
-                <option value="full">+ dim, sus4</option>
+            <label class="field" title="When chords may change: wherever the harmony changes, on the beats, or Auto: free for songs with (almost) no drums, once the stems are separated, otherwise on beats.">
+              <span>Timing</span>
+              <select id="timing">
+                <option value="free">Free</option>
+                <option value="beats">On beats</option>
+                <option value="auto">Auto</option>
               </select>
             </label>
-            <label title="Power chords: label a chord as E5 (root and fifth) where no third is heard, instead of guessing major or minor">
-              <input id="power" type="checkbox" checked />
-              Power chords
+            <label class="field" title="Beat grid tempo: a steady tempo (the detected one, its double / half, or another candidate), or Beat This!, an AI model that follows tempo changes and finds the bars.">
+              <span>Tempo</span>
+              <select id="tempo-select"></select>
             </label>
-            <label>
-              Smoothing
-              <input id="smoothing" type="range" min="0" max="10" step="0.5" value="5" />
+            <label class="check" title="Move the beat grid by half a beat (when the beats land between the hits)">
+              <input id="half-beat" type="checkbox" />
+              Shift beats by ½
             </label>
-            <label title="How strongly chords are pulled toward the song's key. Helps when the third is missing or ambiguous (power chords); lower it for songs that use chords from outside the key.">
-              Key bias
-              <input id="key-bias" type="range" min="0" max="10" step="0.5" value="5" />
-            </label>
-            <label>
-              Meter
+            <label class="field">
+              <span>Meter</span>
               <select id="meter">
                 <option value="3">3/4</option>
                 <option value="4" selected>4/4</option>
               </select>
             </label>
-            <div class="transpose">
-              <span>Transpose</span>
-              <button id="tr-down" class="button small">−</button>
-              <span id="tr-value" class="tr-value">0</span>
-              <button id="tr-up" class="button small">+</button>
+          </div>
+        </details>
+
+        <details data-section="detector" open>
+          <summary>Harmony detector</summary>
+          <div class="section">
+            <label class="field" title="Which detector finds the chords: chord-er's own, or Chordino (the NNLS Chroma plugin from Sonic Visualiser, run in the browser).">
+              <span>Detector</span>
+              <select id="detector">
+                <option value="chorder">chord-er (default)</option>
+                <option value="chordino">Chordino</option>
+              </select>
+            </label>
+            <div id="chorder-options" class="suboptions">
+              <label class="field" title="How readily chords and bass notes change. Raise it if the chart flickers, lower it if quick changes are missed. Above the middle, short slash chords are also left out.">
+                <span>Smoothing</span>
+                <input id="smoothing" type="range" min="0" max="10" step="0.5" value="5" />
+              </label>
+              <label class="field" title="How strongly chords are pulled toward the song's key. Helps when the third is missing or ambiguous; lower it for songs that use chords from outside the key.">
+                <span>Key bias</span>
+                <input id="key-bias" type="range" min="0" max="10" step="0.5" value="5" />
+              </label>
             </div>
           </div>
-        </div>
-      </section>
-    </main>
+        </details>
+
+        <details data-section="namer" open>
+          <summary>Chord namer</summary>
+          <div class="section">
+            <div class="subhead">Allowed chords</div>
+            <div class="checks">
+              <label class="check" title="Always allowed"><input type="checkbox" checked disabled /> Major / minor</label>
+              <label class="check" title="7, maj7 and m7"><input data-allow="sevenths" type="checkbox" /> Sevenths</label>
+              <label class="check"><input data-allow="sus" type="checkbox" /> sus2, sus4</label>
+              <label class="check" title="Label a chord as E5 (root and fifth) where no third is heard, instead of guessing major or minor. chord-er's detector only."><input data-allow="power" type="checkbox" /> Power chords</label>
+              <label class="check"><input data-allow="dim" type="checkbox" /> dim</label>
+              <label class="check"><input data-allow="aug" type="checkbox" /> aug</label>
+            </div>
+            <div class="subhead">Bass</div>
+            <label class="check" title="Detect the bass note (from the bass stem: needs the stem separation AI model) and show it as a slash chord, e.g. C/E, when it isn't the chord's root.">
+              <input id="slash" type="checkbox" />
+              Slash chords (AI)
+            </label>
+            <div class="suboptions">
+              <label class="check" title="Re-spell a slash chord as the chord rooted on its bass note when that gives a familiar chord (major, minor, 7, maj7, m7, dim, sus4, sus2 or 6, or m9 from a maj7 over its 6th), e.g. F#sus4/B as Bsus2 or C/A as Am7. Others, such as C/B, stay as slash chords.">
+                <input id="respell" type="checkbox" />
+                Re-spell slashes
+              </label>
+              <label class="check" title="When the bass moves to the next chord's root up to 2 beats before the harmony changes (Bb/D → Dm), start that chord where the bass moved instead of showing a short slash chord. chord-er's detector only.">
+                <input id="early" type="checkbox" />
+                Early changes
+              </label>
+              <label class="check" title="Experimental: re-read a slash chord X/Y as a chord built on its bass note Y that fits the key, when the audio supports it nearly as well (Bm7/F# in B minor → F#m7 when C# and E are there). chord-er's detector only.">
+                <input id="rebuild" type="checkbox" />
+                Rebuild on bass
+              </label>
+            </div>
+          </div>
+        </details>
+
+        <details data-section="mixer" open>
+          <summary>Mixer</summary>
+          <div class="section mixer">
+            <div class="mix-row" data-channel="music" title="Volume of the song">
+              <span>Music</span>
+              <input type="range" min="0" max="100" value="100" />
+              <button class="ms" data-mute title="Mute">M</button>
+              <button class="ms" data-solo title="Solo">S</button>
+            </div>
+            <div class="mix-row" data-channel="click" title="A metronome click on every beat of the detected grid (higher on the first beat of each bar)">
+              <span>Click</span>
+              <input type="range" min="0" max="100" value="0" />
+              <button class="ms" data-mute title="Mute">M</button>
+              <button class="ms" data-solo title="Solo">S</button>
+            </div>
+            <div class="mix-row" data-channel="chordSynth" title="A synth playing the detected chords">
+              <span>Chord synth</span>
+              <input type="range" min="0" max="100" value="50" />
+              <button class="ms" data-mute title="Mute">M</button>
+              <button class="ms" data-solo title="Solo">S</button>
+            </div>
+            <div class="mix-row" data-channel="bassSynth" title="A synth bass playing the detected bass note (the chord roots without slash chords)">
+              <span>Bass synth</span>
+              <input type="range" min="0" max="100" value="50" />
+              <button class="ms" data-mute title="Mute">M</button>
+              <button class="ms" data-solo title="Solo">S</button>
+            </div>
+            <div class="subhead">Stems</div>
+            <div id="stem-rows" hidden title="The separated stems, mixed into the music. The song briefly reloads after a change.">
+              <div class="mix-row" data-channel="vocals">
+                <span>Vocals</span>
+                <input type="range" min="0" max="100" value="100" />
+                <button class="ms" data-mute title="Mute">M</button>
+                <button class="ms" data-solo title="Solo">S</button>
+              </div>
+              <div class="mix-row" data-channel="drums">
+                <span>Drums</span>
+                <input type="range" min="0" max="100" value="100" />
+                <button class="ms" data-mute title="Mute">M</button>
+                <button class="ms" data-solo title="Solo">S</button>
+              </div>
+              <div class="mix-row" data-channel="bass">
+                <span>Bass</span>
+                <input type="range" min="0" max="100" value="100" />
+                <button class="ms" data-mute title="Mute">M</button>
+                <button class="ms" data-solo title="Solo">S</button>
+              </div>
+              <div class="mix-row" data-channel="other">
+                <span>Other</span>
+                <input type="range" min="0" max="100" value="100" />
+                <button class="ms" data-mute title="Mute">M</button>
+                <button class="ms" data-solo title="Solo">S</button>
+              </div>
+            </div>
+            <div id="stems-missing" class="hint">
+              Not separated yet.
+              <button id="separate" class="button small-text">Separate stems (AI)</button>
+            </div>
+          </div>
+        </details>
+      </aside>
+    </div>
 
     <div id="overlay" class="overlay" hidden>
       <div class="progress-card">
@@ -194,20 +258,15 @@
 
     <dialog id="model-dialog" class="dialog">
       <form method="dialog">
-        <h2>Download the AI models?</h2>
-        <p>Chord-er can use two AI models for a better analysis:</p>
-        <ul>
-          <li><strong>Beat tracking</strong> (82 MB): follows tempo changes and finds the bars.</li>
-          <li><strong>Stem separation</strong> (166 MB): isolates the harmony and the bass, for more accurate chords and slash chords.</li>
-        </ul>
+        <h2 id="model-title">Download the AI model?</h2>
+        <p id="model-purpose"></p>
         <p>
-          They are downloaded once from Hugging Face and then kept in your browser's cache. Your audio never
-          leaves your computer either way.
+          It is downloaded once from Hugging Face and then kept in your browser's cache. Your audio never leaves your
+          computer either way.
         </p>
-        <p class="muted">Without them you get the basic analysis: a steady-tempo beat grid and chords from the full mix.</p>
         <div class="dialog-buttons">
           <button value="skip" class="button">Not now</button>
-          <button value="download" class="button primary" autofocus>Download (248 MB)</button>
+          <button id="model-download" value="download" class="button primary" autofocus>Download</button>
         </div>
       </form>
     </dialog>

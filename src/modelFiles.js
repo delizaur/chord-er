@@ -12,5 +12,3 @@ export const BEAT_FRONTEND_URL = `${BEAT_THIS}/frontend.json`;
 // HTDemucs v4 (MIT, Meta) exported to ONNX with the STFT outside the graph.
 export const SEPARATION_MODEL_URL =
   'https://huggingface.co/Ghilda/htdemucs-onnx/resolve/850cd89461d0817276337061c29e6abceb86d75f/htdemucs.onnx';
-
-export const MODEL_URLS = [BEAT_FRONTEND_URL, BEAT_MODEL_URL, SEPARATION_MODEL_URL];
