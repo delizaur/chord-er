@@ -1,6 +1,6 @@
 // Host side: runs Chordino on a mono signal the way Vamp hosts (Sonic Visualiser, sonic-annotator)
 // do. PluginHostAdapter wraps the plugin's C descriptor, and PluginInputDomainAdapter supplies the
-// windowed FFT frames Chordino expects. Default parameters, preferred block and step sizes.
+// windowed FFT frames Chordino expects. Preferred block and step sizes.
 
 #include <vamp-hostsdk/PluginHostAdapter.h>
 #include <vamp-hostsdk/PluginInputDomainAdapter.h>
@@ -18,12 +18,16 @@ extern "C" const VampPluginDescriptor *chordinoDescriptor();
 
 static std::string result;
 
+// Chordino's parameters, in the order chordino_run takes their values.
+static const char *const parameterIds[] = {"useNNLS", "s", "whitening", "rollon", "boostn", "tuningmode"};
+
 // Returns the "simplechord" output as lines of "<seconds>\t<label>", or a line starting with
-// "error" when the plugin can't run.
-extern "C" const char *chordino_run(const float *samples, int length, float sampleRate)
+// "error" when the plugin can't run. `parameters` holds a value for each of parameterIds.
+extern "C" const char *chordino_run(const float *samples, int length, float sampleRate, const float *parameters)
 {
     result.clear();
     Plugin *plugin = new PluginInputDomainAdapter(new Vamp::PluginHostAdapter(chordinoDescriptor(), sampleRate));
+    for (const char *id : parameterIds) plugin->setParameter(id, *parameters++);
     const size_t block = plugin->getPreferredBlockSize();
     const size_t step = plugin->getPreferredStepSize();
     if (!plugin->initialise(1, step, block)) {

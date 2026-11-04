@@ -456,6 +456,20 @@ body.dragging .timeline-wrap {
   gap: 8px;
 }
 
+.field.valued {
+  grid-template-columns: 88px 1fr 34px;
+}
+
+.field output {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+#chordino-reset {
+  align-self: flex-start;
+}
+
 .field select,
 .field input[type='range'] {
   width: 100%;

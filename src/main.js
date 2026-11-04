@@ -53,6 +53,9 @@ const ui = {
   meter: $('meter'),
   detector: $('detector'),
   chorderOptions: $('chorder-options'),
+  chordinoOptions: $('chordino-options'),
+  chordinoInputs: [...document.querySelectorAll('[data-chordino]')],
+  chordinoReset: $('chordino-reset'),
   smoothing: $('smoothing'),
   keyBias: $('key-bias'),
   allow: [...document.querySelectorAll('[data-allow]')],
@@ -96,6 +99,8 @@ const DEFAULTS = {
   detector: 'chorder', // 'chorder' or 'chordino'
   smoothing: 5,
   keyBias: 5, // slider value; the score bonus for chords that fit the key is × 0.02
+  // Chordino's parameters, at its defaults (as in Sonic Visualiser). tuning: 0 global, 1 local.
+  chordino: { useNNLS: true, shape: 0.7, whitening: 1, rollon: 0, boostN: 0.1, tuning: 0 },
   allowed: { sevenths: true, sus: false, power: true, dim: false, aug: false }, // besides maj/min
   slash: false, // split chords where the bass note changes and show it as C/E (needs the stems)
   respell: false, // re-spell slash chords rooted on the bass when that gives a familiar chord
@@ -120,7 +125,7 @@ function loadPrefs() {
     // no saved settings, or storage blocked
   }
   const merged = { ...structuredClone(DEFAULTS), ...saved };
-  for (const group of ['allowed', 'sections']) merged[group] = { ...DEFAULTS[group], ...saved[group] };
+  for (const group of ['allowed', 'chordino', 'sections']) merged[group] = { ...DEFAULTS[group], ...saved[group] };
   merged.mixer = Object.fromEntries(Object.keys(DEFAULTS.mixer).map((c) => [c, { ...DEFAULTS.mixer[c], ...saved.mixer?.[c] }]));
   return merged;
 }
@@ -143,7 +148,8 @@ const view = {
 
 let analysis = null; // worker output, independent of the settings; later also .tracked (Beat This!
 // beats), .harmony (chroma of bass + other), .bassStem (analysis of the bass stem), .drumShare (the
-// drums' share of the instrumental energy) and .chordino (Chordino's chords per source)
+// drums' share of the instrumental energy) and .chordino (Chordino's chords per source and
+// parameters; .chordinoLast keeps each source's latest, shown while new parameters run)
 let stems = null; // the separated stems as 16-bit [left, right], in STEM_NAMES order
 let grid = null; // beat grid and beat-synchronous chroma for the current tempo settings
 let key = null;
@@ -161,7 +167,7 @@ let loadId = 0; // identifies the current song, so results for a replaced song a
 let songFile = null; // the loaded file, decoded again for the stems and Chordino
 let beatSamples = null; // the mono analysis signal, for Beat This!
 let jobs = {}; // per song: the AI model jobs ('beats', 'stems') asked for or running
-let chordinoRunning = new Set(); // per song: Chordino sources being analyzed
+let chordinoRunning = new Set(); // per song: Chordino runs (source and parameters) in progress
 let objectUrl = null; // the original file
 let mixUrl = null; // the current stem mix, when the stems aren't all at full volume
 
@@ -196,6 +202,7 @@ async function loadFile(file) {
     beatSamples = samples.slice(); // the analysis worker takes ownership of `samples`
     analysis = await runAnalysis({ samples, sampleRate: ANALYSIS_SAMPLE_RATE }, showProgress);
     analysis.chordino = {};
+    analysis.chordinoLast = {};
     songFile = file;
     key = null;
     stems = null;
@@ -421,16 +428,20 @@ const CHORDINO_RATE = 44100;
 // Chordino analyzes the harmony once the stems are there, else the full mix.
 const chordinoSource = () => (prefs.source === 'harmony' && stems ? 'harmony' : 'mix');
 
-// Starts Chordino for the current source when it is the chosen detector and hasn't run yet.
+// Results are kept per source and parameters.
+const chordinoKey = () => `${chordinoSource()} ${JSON.stringify(prefs.chordino)}`;
+
+// Starts Chordino for the current source and parameters when it is the chosen detector and
+// hasn't run with them yet.
 function ensureChordino() {
   if (prefs.detector !== 'chordino' || !analysis) return;
-  const which = chordinoSource();
-  if (analysis.chordino[which] || chordinoRunning.has(which)) return;
-  chordinoRunning.add(which);
-  runChordino(which);
+  const runKey = chordinoKey();
+  if (analysis.chordino[runKey] || chordinoRunning.has(runKey)) return;
+  chordinoRunning.add(runKey);
+  runChordino(chordinoSource(), runKey, { ...prefs.chordino });
 }
 
-async function runChordino(which) {
+async function runChordino(which, runKey, parameters) {
   const id = loadId;
   showStatus('Running Chordino');
   try {
@@ -444,9 +455,9 @@ async function runChordino(which) {
         for (const ch of stem) for (let i = 0; i < samples.length; i++) samples[i] += ch[i] / (2 * 32767);
       }
     }
-    const { chords } = await runModel('chordino', { samples, sampleRate: CHORDINO_RATE }, [samples.buffer]);
+    const { chords } = await runModel('chordino', { samples, sampleRate: CHORDINO_RATE, parameters }, [samples.buffer]);
     if (id !== loadId) return;
-    analysis.chordino[which] = chords;
+    analysis.chordino[runKey] = analysis.chordinoLast[which] = chords;
     showStatus(null);
     refresh();
   } catch (err) {
@@ -559,8 +570,10 @@ function refresh() {
   }
 
   // Chordino's chords keep its own timing and slash chords; their qualities are reduced to the
-  // allowed ones. Until it has run, chord-er's chords show.
-  const chordino = prefs.detector === 'chordino' ? analysis.chordino[chordinoSource()] : null;
+  // allowed ones. While new parameters run, its previous chords show; before its first run,
+  // chord-er's.
+  const chordino =
+    prefs.detector === 'chordino' ? (analysis.chordino[chordinoKey()] ?? analysis.chordinoLast[chordinoSource()]) : null;
   let pieces;
   if (chordino) {
     pieces = chordinoPieces(chordino, duration).map((p) => ({ ...p, quality: allowedQuality(p.quality, prefs.allowed) }));
@@ -899,6 +912,13 @@ function syncControls() {
   if (analysis) ui.tempoSelect.value = view.tempo;
   ui.detector.value = prefs.detector;
   ui.chorderOptions.hidden = prefs.detector !== 'chorder';
+  ui.chordinoOptions.hidden = prefs.detector !== 'chordino';
+  for (const input of ui.chordinoInputs) {
+    const value = prefs.chordino[input.dataset.chordino];
+    if (input.type === 'checkbox') input.checked = value;
+    else input.value = value;
+    showChordinoValue(input);
+  }
   ui.smoothing.value = prefs.smoothing;
   ui.keyBias.value = prefs.keyBias;
   for (const box of ui.allow) box.checked = prefs.allowed[box.dataset.allow];
@@ -911,6 +931,11 @@ function syncControls() {
   ui.early.disabled = ui.rebuild.disabled = !prefs.slash || prefs.detector !== 'chorder';
   for (const row of ui.mixRows) row.querySelector('input').value = prefs.mixer[row.dataset.channel].volume;
   for (const section of ui.sections) section.open = prefs.sections[section.dataset.section];
+}
+
+function showChordinoValue(input) {
+  const output = input.nextElementSibling;
+  if (output?.tagName === 'OUTPUT') output.value = input.dataset.chordino === 'rollon' ? `${input.value}%` : input.value;
 }
 
 // A preference changed: remember it, then redraw (`rekey`: the key may change too).
@@ -959,6 +984,18 @@ ui.smoothing.addEventListener('input', () => {
 });
 ui.keyBias.addEventListener('input', () => {
   prefs.keyBias = Number(ui.keyBias.value);
+  changed();
+});
+// Each change re-runs Chordino (a few seconds), so sliders apply when released.
+for (const input of ui.chordinoInputs) {
+  input.addEventListener('input', () => showChordinoValue(input));
+  input.addEventListener('change', () => {
+    prefs.chordino[input.dataset.chordino] = input.type === 'checkbox' ? input.checked : Number(input.value);
+    changed();
+  });
+}
+ui.chordinoReset.addEventListener('click', () => {
+  prefs.chordino = { ...DEFAULTS.chordino };
   changed();
 });
 for (const box of ui.allow) {
