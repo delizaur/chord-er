@@ -77,7 +77,8 @@ const keyOf = (row, item, index) => (row === 'custom' ? `c${item.id}` : `g${inde
 // Canvas view that scrolls the song past a fixed playhead: the custom chord timeline above the
 // generated one, the chromagram and the waveform. Chords are selected with clicks and marquees,
 // dragged from the generated timeline into the custom one (copied), moved within the custom one,
-// dragged out of it (deleted), and resized there by their edges. Edits go to `onEdit`.
+// dragged out of it (deleted), and resized there by their edges; a double click copies a generated
+// chord at its own times. Edits go to `onEdit`.
 export class Timeline {
   constructor(canvas, { onSeek, onZoom, onEdit }) {
     this.canvas = canvas;
@@ -314,6 +315,13 @@ export class Timeline {
       }
       this.updateCursor(x, y);
       this.draw();
+    });
+    // Double-clicking a generated chord copies it to the custom timeline at the same times.
+    canvas.addEventListener('dblclick', (e) => {
+      const box = this.boxAt(e.offsetX, e.offsetY);
+      if (box?.row !== 'generated') return;
+      const ids = this.onEdit({ type: 'place', items: [{ index: box.index, start: box.item.start, end: box.item.end }] });
+      if (ids) this.select('custom', ids);
     });
     canvas.addEventListener('pointercancel', () => {
       this.gesture = null;
