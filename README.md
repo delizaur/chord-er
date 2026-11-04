@@ -56,11 +56,21 @@ Drop an audio file on the page or click **Open audio**. The song is playable rig
 - **Stems**: **Vocals**, **Drums**, **Bass** and **Other** once the stems are separated (or **Separate stems** to do it just for the mixer), e.g. to mute the vocals or to practice along without the bass. The stems are remixed into a single track that replaces the original, so the song briefly reloads after a change (it keeps its position and speed); with all four at full volume the original file plays.
 - Every channel has **M** (mute) and **S** (solo). While any channel is soloed, only soloed channels play; soloing a stem keeps the music on with just the soloed stems.
 
+### Custom chord chart
+
+The timeline has two chord rows: the **custom** timeline on top and the **generated** one (the detected chords) below it. They scroll together.
+
+- One of them is **active**: the chord and bass synths, Now / Next, the notes graph and the chromagram highlights follow it. Switch with the **Generated / Custom** buttons in the bottom bar or the **A** key. Where the custom timeline has no chord, nothing plays.
+- **Select** chords with a left click (Shift or Ctrl + click adds or removes one), or by dragging a marquee from an empty spot (Shift adds to the selection). A right click or **Esc** deselects.
+- **Drag** selected generated chords onto the custom timeline to copy them there; each edge lands on the nearest beat, and they replace any custom chords they overlap. Drag custom chords to move them, or out of the custom timeline (or press **Delete**) to delete them. Drag a custom chord's edge to change where it starts or ends (snapped to beats; hold **Shift** to place it freely).
+- **Ctrl + Z** undoes an edit, **Ctrl + Y** (or Ctrl + Shift + Z) redoes it.
+- Custom chords never change on their own: the sidebar's detector and chord-namer settings only change the generated timeline. Only their spelling follows the key and **Transpose**. The custom chart is saved in the browser for each song (recognized by the file's contents) and comes back when the same file is loaded again.
+
 ### Player
 
 - The **Notes in the harmony** graph highlights the current chord's tones in yellow and the bass note in blue.
 - The timeline shows, between the chord blocks and the waveform, how strongly each of the 12 notes sounds over time (brighter is stronger, from the same data as the notes graph). The detected chord tones are overlaid in translucent yellow and the bass note in blue, so you can see where the detection follows the audio and where it doesn't.
-- **Space** plays or pauses. **← / →** jump 5 s. Drag the timeline or scroll over it to seek, and **Ctrl + scroll** to zoom.
+- **Space** plays or pauses. **← / →** jump 5 s. Scroll over the timeline or drag it with the middle mouse button to move through the song, and **Ctrl + scroll** to zoom. Click or drag on the bar numbers or the waveform to jump.
 - All settings take effect immediately; only the AI models and Chordino take a moment, the first time they're needed for a song.
 
 ## How it works

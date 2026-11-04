@@ -85,6 +85,8 @@ const ui = {
   trDown: $('tr-down'),
   trUp: $('tr-up'),
   trValue: $('tr-value'),
+  activeGenerated: $('active-generated'),
+  activeCustom: $('active-custom'),
   overlay: $('overlay'),
   stage: $('stage'),
   progress: $('progress-fill'),
@@ -148,6 +150,7 @@ const view = {
   tempo: '0:1', // "<steady-tempo candidate index, or 'ai' for Beat This!>:<tempo multiplier>"
   halfBeat: false,
   transpose: 0,
+  active: 'generated', // the chord timeline the synths and highlights follow: 'generated' or 'custom'
 };
 
 let analysis = null; // worker output, independent of the settings; later also .tracked (Beat This!
@@ -185,6 +188,7 @@ const noteGraph = new NoteGraph($('note-graph'));
 const timeline = new Timeline($('timeline'), {
   onSeek: seek,
   onZoom: (pxPerSec) => (ui.zoom.value = pxPerSec),
+  onEdit: editCustom,
 });
 
 // ---------- Loading & analysis ----------
@@ -226,9 +230,14 @@ async function loadFile(file) {
     ui.title.textContent = file.name.replace(/\.[^.]+$/, '');
     ui.dropzone.hidden = true;
     ui.player.hidden = false;
+    custom = [];
+    undoStack = [];
+    redoStack = [];
+    customKey = null;
     refresh();
     seek(0);
     requestModels();
+    loadCustom(file, id);
   } catch (err) {
     console.error(err);
     ui.dropError.textContent = `Could not analyze “${file.name}”: ${err.message || err}`;
@@ -615,16 +624,20 @@ function refresh() {
         label: chordLabel(root, c.quality, shownKey, bass),
         voicing: chordVoicing(c.root, c.quality),
         tones: c.root < 0 ? [] : QUALITIES[c.quality].intervals.map((iv) => (c.root + iv) % 12),
+        chord: { root: c.root, quality: c.quality, bass: c.bass ?? -1 }, // as copied to the custom timeline
       };
     }),
   });
+  buildCustom();
   ui.timing.querySelector('[value=auto]').text = `Auto (${free ? 'free' : 'on beats'})`;
   timeline.setData({
     duration,
     beats,
     bars,
-    chords: song.chords,
-    bass: song.bass,
+    generated: song.chords,
+    custom: customView.boxes,
+    active: view.active,
+    overlay: activeTrack(),
     chroma: { frameTimes: frames.frameTimes, values: frames.treble, names: noteNames(key) },
     peaks: analysis.peaks,
     peaksPerSec: analysis.peaksPerSec,
@@ -659,6 +672,147 @@ function mergeSameChord(pieces) {
     else out.push({ ...p });
   }
   return out;
+}
+
+// ---------- Custom chord timeline ----------
+
+// The user's own chord chart: chords copied from the generated timeline, then moved, resized or
+// deleted. They keep their root, quality and bass whatever the settings; only their spelling follows
+// the key and Transpose. Saved per song, keyed by the file's SHA-256.
+let custom = []; // [{ id, start, end, root, quality, bass }], by start, not overlapping
+let nextCustomId = 1;
+let customKey = null; // where the current song's chart is saved
+let undoStack = []; // earlier versions of `custom`
+let redoStack = [];
+// The chart as shown: its boxes, the chords to play (gaps as N.C.) and the bass line.
+let customView = { boxes: [], chords: [], bass: [] };
+
+// The chords and bass line the synths, panels and highlights follow.
+const activeTrack = () => (view.active === 'custom' ? customView : song);
+
+function buildCustom() {
+  const shownKey = transposeKey(key, view.transpose);
+  const gap = (start, end) => ({ start, end, root: -1, quality: 'N', bass: -1 });
+  const track = [];
+  let t = 0;
+  for (const c of custom) {
+    if (c.start > t + 1e-6) track.push(gap(t, c.start));
+    track.push(c);
+    t = c.end;
+  }
+  if (analysis && t < analysis.duration) track.push(gap(t, analysis.duration));
+  const chords = track.map((c) => {
+    const root = transposeRoot(c.root, view.transpose);
+    return {
+      ...c,
+      root,
+      label: chordLabel(root, c.quality, shownKey, transposeRoot(c.bass, view.transpose)),
+      voicing: chordVoicing(c.root, c.quality),
+      tones: c.root < 0 ? [] : QUALITIES[c.quality].intervals.map((iv) => (c.root + iv) % 12),
+    };
+  });
+  customView = {
+    boxes: chords.filter((c) => c.id !== undefined),
+    chords,
+    bass: track.map((c) => ({ start: c.start, pc: c.root < 0 ? -1 : c.bass >= 0 ? c.bass : c.root })),
+  };
+}
+
+// Removes the span from..to from the chords in `list`, trimming or splitting those it overlaps.
+function carve(list, from, to) {
+  return list.flatMap((c) => {
+    if (c.end <= from || c.start >= to) return [c];
+    const parts = [];
+    if (c.start < from) parts.push({ ...c, end: from });
+    if (c.end > to) parts.push({ ...c, id: c.start < from ? nextCustomId++ : c.id, start: to });
+    return parts;
+  });
+}
+
+// Adds chords to `list`; they replace whatever they overlap.
+function placeAll(list, items) {
+  for (const item of items) list = carve(list, item.start, item.end);
+  return [...list, ...items].sort((a, b) => a.start - b.start);
+}
+
+// Applies an edit from the timeline; returns the ids of newly placed chords.
+function editCustom(action) {
+  if (!analysis) return;
+  const before = custom;
+  let ids;
+  if (action.type === 'place') {
+    const items = action.items.map(({ index, start, end }) => ({ id: nextCustomId++, start, end, ...song.chords[index].chord }));
+    ids = items.map((c) => c.id);
+    custom = placeAll(custom, items);
+  } else if (action.type === 'move') {
+    const moves = new Map(action.items.map((m) => [m.id, m]));
+    const moved = custom.filter((c) => moves.has(c.id)).map((c) => ({ ...c, start: moves.get(c.id).start, end: moves.get(c.id).end }));
+    custom = placeAll(custom.filter((c) => !moves.has(c.id)), moved);
+  } else if (action.type === 'delete') {
+    const ids = new Set(action.ids);
+    custom = custom.filter((c) => !ids.has(c.id));
+  } else if (action.type === 'resize') {
+    const chord = custom.find((c) => c.id === action.id);
+    if (!chord) return;
+    custom = placeAll(custom.filter((c) => c !== chord), [{ ...chord, start: action.start, end: action.end }]);
+  }
+  if (custom === before) return ids;
+  undoStack.push(before);
+  if (undoStack.length > 200) undoStack.shift();
+  redoStack = [];
+  customChanged();
+  return ids;
+}
+
+function undoCustom(from, to) {
+  if (!from.length) return;
+  to.push(custom);
+  custom = from.pop();
+  customChanged();
+}
+
+function customChanged({ save = true } = {}) {
+  if (save) saveCustom();
+  buildCustom();
+  timeline.setData({ custom: customView.boxes, overlay: activeTrack() });
+  shown = {};
+  resetSchedule();
+}
+
+function saveCustom() {
+  if (!customKey) return;
+  try {
+    if (custom.length) localStorage.setItem(customKey, JSON.stringify(custom.map(({ start, end, root, quality, bass }) => ({ start, end, root, quality, bass }))));
+    else localStorage.removeItem(customKey);
+  } catch {
+    // not saved
+  }
+}
+
+// Restores the chart saved for this file, if any.
+async function loadCustom(file, id) {
+  const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', await file.arrayBuffer()));
+  if (id !== loadId) return;
+  customKey = `chord-er-custom:${Array.from(hash, (b) => b.toString(16).padStart(2, '0')).join('')}`;
+  let saved = [];
+  try {
+    saved = JSON.parse(localStorage.getItem(customKey)) ?? [];
+  } catch {
+    // nothing saved, or storage blocked
+  }
+  if (!saved.length || custom.length) return;
+  custom = saved.map((c) => ({ ...c, id: nextCustomId++ }));
+  customChanged({ save: false });
+}
+
+function setActive(row) {
+  view.active = row;
+  ui.activeGenerated.classList.toggle('on', row === 'generated');
+  ui.activeCustom.classList.toggle('on', row === 'custom');
+  if (!song) return;
+  timeline.setData({ active: row, overlay: activeTrack() });
+  shown = {};
+  resetSchedule();
 }
 
 // ---------- Mixer ----------
@@ -776,7 +930,8 @@ function showChord(el, label) {
 
 let shown = {};
 function updatePanel(t) {
-  const { chords, bars } = song;
+  const { bars } = song;
+  const { chords } = activeTrack();
   const ci = indexAt(chords, t, (c) => c.start);
   const beat = indexAt(grid.beats, t);
   const next = chords[ci + 1];
@@ -859,7 +1014,8 @@ function schedule() {
   const offset = [...clockOffsets].sort((a, b) => a - b)[clockOffsets.length >> 1];
 
   const { beats } = grid;
-  const { chords, bars, bass } = song;
+  const { bars } = song;
+  const { chords, bass } = activeTrack();
   const chordAt = (t) => chords[indexAt(chords, t, (c) => c.start)];
   const bassAt = (t) => bass[indexAt(bass, t, (b) => b.start)]?.pc ?? -1;
   if (scheduledUntil === null) {
@@ -898,7 +1054,8 @@ function frame() {
     timeline.setTime(t);
     updatePanel(t);
     schedule();
-    noteGraph.update(t, song.chords[indexAt(song.chords, t, (c) => c.start)]?.tones, song.bass[indexAt(song.bass, t, (b) => b.start)]?.pc ?? -1);
+    const { chords, bass } = activeTrack();
+    noteGraph.update(t, chords[indexAt(chords, t, (c) => c.start)]?.tones, bass[indexAt(bass, t, (b) => b.start)]?.pc ?? -1);
   }
   requestAnimationFrame(frame);
 }
@@ -1057,8 +1214,28 @@ for (const [button, delta] of [
   });
 }
 
+ui.activeGenerated.addEventListener('click', () => setActive('generated'));
+ui.activeCustom.addEventListener('click', () => setActive('custom'));
+
 window.addEventListener('keydown', (e) => {
-  if (e.code === 'Space') {
+  const typing = e.target instanceof HTMLSelectElement || (e.target instanceof HTMLInputElement && !['range', 'checkbox'].includes(e.target.type));
+  const ctrl = e.ctrlKey || e.metaKey;
+  if (!typing && !ctrl && !e.altKey && e.code === 'KeyA') {
+    setActive(view.active === 'custom' ? 'generated' : 'custom');
+  } else if (!typing && (e.code === 'Delete' || e.code === 'Backspace')) {
+    e.preventDefault();
+    const ids = timeline.selectedCustomIds();
+    if (ids.length) editCustom({ type: 'delete', ids });
+  } else if (e.code === 'Escape') {
+    timeline.clearSelection();
+  } else if (!typing && ctrl && e.code === 'KeyZ') {
+    e.preventDefault();
+    if (e.shiftKey) undoCustom(redoStack, undoStack);
+    else undoCustom(undoStack, redoStack);
+  } else if (!typing && ctrl && e.code === 'KeyY') {
+    e.preventDefault();
+    undoCustom(redoStack, undoStack);
+  } else if (e.code === 'Space') {
     if (e.target instanceof HTMLInputElement && e.target.type !== 'range' && e.target.type !== 'checkbox') return;
     e.preventDefault();
     // Blur first so the keyup doesn't also "click" a focused button or toggle a checkbox.
