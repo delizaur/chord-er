@@ -475,6 +475,29 @@ export function rebuildOnBass(pieces, grid, key) {
   });
 }
 
+// Puts chords found with their own timing (Chordino's) on the beat grid: each beat gets the chord
+// that covers most of it, and neighbouring beats with the same chord (and bass) join.
+export function snapToBeats(pieces, beats, duration) {
+  const edges = [...(beats[0] > 0 ? [0] : []), ...beats, duration].filter((t, i, all) => t <= duration && (i === 0 || t > all[i - 1]));
+  const out = [];
+  let k = 0;
+  for (let i = 0; i + 1 < edges.length; i++) {
+    const [from, to] = [edges[i], edges[i + 1]];
+    while (k + 1 < pieces.length && pieces[k].end <= from) k++;
+    let best = null;
+    let bestOverlap = 0;
+    for (let j = k; j < pieces.length && pieces[j].start < to; j++) {
+      const overlap = Math.min(to, pieces[j].end) - Math.max(from, pieces[j].start);
+      if (overlap > bestOverlap) [best, bestOverlap] = [pieces[j], overlap];
+    }
+    if (!best) continue;
+    const last = out[out.length - 1];
+    if (last && last.root === best.root && last.quality === best.quality && last.bass === best.bass) last.end = to;
+    else out.push({ ...best, start: from, end: to, startBeat: i });
+  }
+  return out;
+}
+
 // With more smoothing, short slash chords are left out: above 5, slash pieces up to
 // (smoothing − 5) / 2.5 beats long (1 beat at 7.5, 2 at 10) lose their slash and join the same
 // chord around them. `beatLength` is the typical beat length in seconds.

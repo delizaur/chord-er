@@ -17,6 +17,7 @@ import {
   rebuildOnBass,
   refineChanges,
   respellSlash,
+  snapToBeats,
   splitByBass,
   transposeKey,
   transposeRoot,
@@ -569,14 +570,15 @@ function refresh() {
     ({ chords } = decodeChords(chordGrid, key, decoding));
   }
 
-  // Chordino's chords keep its own timing and slash chords; their qualities are reduced to the
-  // allowed ones. While new parameters run, its previous chords show; before its first run,
-  // chord-er's.
+  // Chordino's chords keep its slash chords, and its own timing unless chords change on beats;
+  // their qualities are reduced to the allowed ones. While new parameters run, its previous chords
+  // show; before its first run, chord-er's.
   const chordino =
     prefs.detector === 'chordino' ? (analysis.chordino[chordinoKey()] ?? analysis.chordinoLast[chordinoSource()]) : null;
   let pieces;
   if (chordino) {
     pieces = chordinoPieces(chordino, duration).map((p) => ({ ...p, quality: allowedQuality(p.quality, prefs.allowed) }));
+    if (!free) pieces = snapToBeats(pieces, beats, duration);
   } else {
     if (prefs.allowed.power) chords = markPowerChords(chords, chordGrid);
     // Pieces of constant chord and bass note. The bass line needs the bass stem: in the full mix
