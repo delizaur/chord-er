@@ -20,6 +20,11 @@
         <span id="key" class="pill" hidden></span>
         <span id="tempo" class="pill" hidden></span>
       </div>
+      <label class="button" title="Load a custom chord chart saved with Export chart (replaces the current one; Ctrl + Z undoes it)">
+        Import chart
+        <input id="chart-import" type="file" accept=".json,application/json" hidden disabled />
+      </label>
+      <button id="chart-export" class="button" title="Save the custom chord chart to a file" disabled>Export chart</button>
       <label class="button primary">
         Open audio
         <input id="file" type="file" accept=".mp3,audio/*" hidden />

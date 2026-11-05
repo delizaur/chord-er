@@ -108,6 +108,12 @@ body {
   border-color: #3a4152;
 }
 
+.button:has(input:disabled),
+.button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
 .button.primary {
   background: var(--accent);
   border-color: var(--accent);

@@ -39,6 +39,8 @@ const $ = (id) => document.getElementById(id);
 const audio = $('audio');
 const ui = {
   file: $('file'),
+  chartImport: $('chart-import'),
+  chartExport: $('chart-export'),
   title: $('song-title'),
   key: $('key'),
   tempo: $('tempo'),
@@ -233,7 +235,9 @@ async function loadFile(file) {
     custom = [];
     undoStack = [];
     redoStack = [];
-    customKey = null;
+    customKey = songHash = null;
+    ui.chartImport.disabled = false;
+    ui.chartExport.disabled = true;
     refresh();
     seek(0);
     requestModels();
@@ -682,6 +686,7 @@ function mergeSameChord(pieces) {
 let custom = []; // [{ id, start, end, root, quality, bass }], by start, not overlapping
 let nextCustomId = 1;
 let customKey = null; // where the current song's chart is saved
+let songHash = null; // the current file's SHA-256 (hex), which identifies its chart
 let undoStack = []; // earlier versions of `custom`
 let redoStack = [];
 // The chart as shown: its boxes, the chords to play (gaps as N.C.) and the bass line.
@@ -773,6 +778,7 @@ function undoCustom(from, to) {
 
 function customChanged({ save = true } = {}) {
   if (save) saveCustom();
+  ui.chartExport.disabled = !custom.length;
   buildCustom();
   timeline.setData({ custom: customView.boxes, overlay: activeTrack() });
   shown = {};
@@ -793,7 +799,8 @@ function saveCustom() {
 async function loadCustom(file, id) {
   const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', await file.arrayBuffer()));
   if (id !== loadId) return;
-  customKey = `chord-er-custom:${Array.from(hash, (b) => b.toString(16).padStart(2, '0')).join('')}`;
+  songHash = Array.from(hash, (b) => b.toString(16).padStart(2, '0')).join('');
+  customKey = `chord-er-custom:${songHash}`;
   let saved = [];
   try {
     saved = JSON.parse(localStorage.getItem(customKey)) ?? [];
@@ -803,6 +810,63 @@ async function loadCustom(file, id) {
   if (!saved.length || custom.length) return;
   custom = saved.map((c) => ({ ...c, id: nextCustomId++ }));
   customChanged({ save: false });
+}
+
+// ---------- Chart files ----------
+
+// A chart file: the custom chords with readable labels (untransposed, spelled for the detected
+// key), for the audio file with this SHA-256.
+function exportChart() {
+  const chart = {
+    app: 'chord-er',
+    version: 1,
+    song: ui.title.textContent,
+    sha256: songHash,
+    duration: analysis.duration,
+    key: keyLabel(key),
+    chords: custom.map(({ start, end, root, quality, bass }) => ({
+      start: Number(start.toFixed(4)),
+      end: Number(end.toFixed(4)),
+      label: chordLabel(root, quality, key, bass),
+      root,
+      quality,
+      bass,
+    })),
+  };
+  const url = URL.createObjectURL(new Blob([JSON.stringify(chart, null, 2)], { type: 'application/json' }));
+  const link = Object.assign(document.createElement('a'), { href: url, download: `${chart.song || 'chord chart'}.chords.json` });
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+// Replaces the custom chart with the one in a chart file (undoable), and makes it active.
+async function importChart(file) {
+  let chart;
+  try {
+    chart = JSON.parse(await file.text());
+  } catch {
+    alert(`“${file.name}” isn't a chord chart file.`);
+    return;
+  }
+  if (chart?.app !== 'chord-er' || !Array.isArray(chart.chords)) {
+    alert(`“${file.name}” isn't a chord-er chart.`);
+    return;
+  }
+  const pc = (v) => Number.isInteger(v) && v >= -1 && v < 12;
+  const chords = chart.chords
+    .filter((c) => Number.isFinite(c.start) && Number.isFinite(c.end) && pc(c.root) && pc(c.bass) && (c.quality === 'N' || QUALITIES[c.quality]))
+    .map((c) => ({ start: Math.max(0, c.start), end: Math.min(analysis.duration, c.end), root: c.root, quality: c.quality, bass: c.bass }))
+    .filter((c) => c.end > c.start);
+  if (chart.sha256 && songHash && chart.sha256 !== songHash) {
+    const made = chart.song ? `“${chart.song}”` : 'a different audio file';
+    if (!confirm(`This chart was made for ${made}, not for the loaded file. Import it anyway?`)) return;
+  }
+  const before = custom;
+  custom = placeAll([], chords.map((c) => ({ ...c, id: nextCustomId++ })));
+  undoStack.push(before);
+  redoStack = [];
+  customChanged();
+  setActive('custom');
 }
 
 function setActive(row) {
@@ -1214,6 +1278,11 @@ for (const [button, delta] of [
   });
 }
 
+ui.chartExport.addEventListener('click', exportChart);
+ui.chartImport.addEventListener('change', () => {
+  if (ui.chartImport.files[0] && analysis) importChart(ui.chartImport.files[0]);
+  ui.chartImport.value = '';
+});
 ui.activeGenerated.addEventListener('click', () => setActive('generated'));
 ui.activeCustom.addEventListener('click', () => setActive('custom'));
 

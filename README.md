@@ -65,6 +65,7 @@ The timeline has two chord rows: the **custom** timeline on top and the **genera
 - **Drag** selected generated chords onto the custom timeline to copy them there; each edge lands on the nearest beat, and they replace any custom chords they overlap. **Double-click** a generated chord to copy it straight up, with exactly its own start and end. Drag custom chords to move them, or out of the custom timeline (or press **Delete**) to delete them. Drag a custom chord's edge to change where it starts or ends (snapped to beats; hold **Shift** to place it freely).
 - **Ctrl + Z** undoes an edit, **Ctrl + Y** (or Ctrl + Shift + Z) redoes it.
 - Custom chords never change on their own: the sidebar's detector and chord-namer settings only change the generated timeline. Only their spelling follows the key and **Transpose**. The custom chart is saved in the browser for each song (recognized by the file's contents) and comes back when the same file is loaded again.
+- **Export chart** (top bar) saves the custom chart to a `.chords.json` file: each chord's times, readable name, root, quality and bass, plus the song's name and the audio file's SHA-256. **Import chart** loads such a file into the custom timeline, replacing the chart there (**Ctrl + Z** brings the old one back) and making it active. A chart made for a different audio file (another download or encoding of the song, say) asks before it is imported. Use it to keep charts safe, move them to another browser or computer, or share them.
 
 ### Player
 
