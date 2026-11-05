@@ -76,7 +76,7 @@ The timeline has two chord rows: the **custom** timeline on top and the **genera
 
 ## How it works
 
-1. **Decode** (`src/audio.js`): `decodeAudioData` decodes and resamples to 22.05 kHz mono.
+1. **Decode** (`src/audio.js`): `decodeAudioData` decodes and resamples to 22.05 kHz mono. For playback, the song is also decoded to 44.1 kHz stereo and played as a WAV rather than as the original file: browsers seek compressed files (MP3s especially) only approximately, so after a seek the music could land tens of milliseconds away from where the player reports it, and the clicks and synths, timed from that, would drift off it. WAV seeks are sample-exact.
 2. **Analyze** (`src/analysis/`, in a Web Worker):
    - **Steady-tempo beats** (`tempo.js`, ported from the drumcoach project): onset curves at 1 ms resolution from a kick band (< 150 Hz) and a snare/cymbal band (> 2.5 kHz). Tempo candidates come from windowed autocorrelation, preferring the double-tempo partner. Period and phase are refined with a comb search and a robust line fit through clear onsets, and drift is followed in 16-beat chunks.
    - **Chroma** (`chroma.js`): an 8192-point STFT (46 ms hop) with global tuning estimation, then a semitone spectrogram (E1–B6). Next come log compression, a temporal median filter (to suppress drums), whitening across pitch, and finally folding into treble and bass chroma.

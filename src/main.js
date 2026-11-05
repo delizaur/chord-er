@@ -177,7 +177,7 @@ let songFile = null; // the loaded file, decoded again for the stems and Chordin
 let beatSamples = null; // the mono analysis signal, for Beat This!
 let jobs = {}; // per song: the AI model jobs ('beats', 'stems') asked for or running
 let chordinoRunning = new Set(); // per song: Chordino runs (source and parameters) in progress
-let objectUrl = null; // the original file
+let objectUrl = null; // the song as played (see playbackWav)
 let mixUrl = null; // the current stem mix, when the stems aren't all at full volume
 
 const synth = new ChordSynth(0);
@@ -210,6 +210,8 @@ async function loadFile(file) {
   try {
     const samples = await decodeToMono(await file.arrayBuffer(), ANALYSIS_SAMPLE_RATE);
     beatSamples = samples.slice(); // the analysis worker takes ownership of `samples`
+    // Playback decodes alongside the analysis (see playbackWav).
+    const playback = playbackWav(file);
     analysis = await runAnalysis({ samples, sampleRate: ANALYSIS_SAMPLE_RATE }, showProgress);
     analysis.chordino = {};
     analysis.chordinoLast = {};
@@ -224,7 +226,7 @@ async function loadFile(file) {
 
     if (objectUrl) URL.revokeObjectURL(objectUrl);
     if (mixUrl) URL.revokeObjectURL(mixUrl);
-    objectUrl = URL.createObjectURL(file);
+    objectUrl = URL.createObjectURL(await playback);
     mixUrl = null;
     appliedStemGains = '';
     audio.src = objectUrl;
@@ -251,6 +253,15 @@ async function loadFile(file) {
   } finally {
     ui.overlay.hidden = true;
   }
+}
+
+// The song as played: decoded once and played as a WAV, not as the original file. Browsers seek
+// compressed files (MP3s especially) only approximately, so after a seek the audio could sit tens
+// of milliseconds or more away from where `audio.currentTime` says, and the synths and clicks,
+// timed from it, would drift off the song until it was reloaded. WAV seeks are sample-exact.
+async function playbackWav(file) {
+  const stereo = await decodeToStereo(await file.arrayBuffer(), MODEL_SAMPLE_RATE);
+  return mixToWav([toInt16(stereo)], [1], MODEL_SAMPLE_RATE);
 }
 
 // Sends one job to a worker and resolves with its result, reporting progress on the way.
