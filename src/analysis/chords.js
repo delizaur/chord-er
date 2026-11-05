@@ -631,6 +631,7 @@ const NAMEABLE = [
   ['m7b5', 'm7b5', [0, 3, 6, 10]],
   ['dim7', 'dim7', [0, 3, 6, 9]],
   ['7sus4', '7sus4', [0, 5, 7, 10]],
+  ['7sus2', '7sus2', [0, 2, 7, 10]],
   ['mMaj7', 'm(maj7)', [0, 3, 7, 11]],
   ['add9', 'add9', [0, 4, 7, 14]],
   ['madd9', 'madd9', [0, 3, 7, 14]],
@@ -647,6 +648,7 @@ const NAMEABLE = [
   ['7b9', '7b9', [0, 4, 7, 10, 13]],
   ['7#9', '7#9', [0, 4, 7, 10, 15]],
   ['11', '11', [0, 7, 10, 14, 17]],
+  ['9sus4', '9sus4', [0, 5, 7, 10, 14]],
   ['m11', 'm11', [0, 3, 7, 10, 14, 17]],
   ['13', '13', [0, 4, 7, 10, 14, 21]],
   ['maj13', 'maj13', [0, 4, 7, 11, 14, 21]],
@@ -705,6 +707,73 @@ export function nameNotes(notes, bass = -1, preferRoot = -1) {
 function compare(a, b) {
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] - b[i];
   return 0;
+}
+
+// ---------- Reading a chord name (renaming custom chords) ----------
+
+// Other ways to write the chord types, besides the suffixes in QUALITIES.
+const SUFFIX_ALIASES = {
+  M: 'maj', maj: 'maj', major: 'maj', min: 'min', minor: 'min', '-': 'min',
+  M7: 'maj7', Maj7: 'maj7', ma7: 'maj7', 'Δ': 'maj7', 'Δ7': 'maj7', 'j7': 'maj7',
+  min7: 'm7', '-7': 'm7', 'ø': 'm7b5', 'ø7': 'm7b5', 'm7(b5)': 'm7b5', '-7b5': 'm7b5',
+  o: 'dim', '°': 'dim', o7: 'dim7', '°7': 'dim7', '+': 'aug', '+7': '7#5', aug7: '7#5',
+  mM7: 'mMaj7', mmaj7: 'mMaj7', mMaj7: 'mMaj7', '-maj7': 'mMaj7', '-Δ': 'mMaj7',
+  sus: 'sus4', '7sus': '7sus4', dom7: '7', add2: 'add9', M9: 'maj9', 'Δ9': 'maj9', '-9': 'm9', min9: 'm9',
+  '6/9': '69', '69': '69', '-6': 'm6', min6: 'm6', m11: 'm11', '-11': 'm11', M13: 'maj13', '-11b5': 'm7b5',
+};
+// Extensions written after a chord type, as intervals above the root (b5 and #5 replace the 5th).
+const EXTENSIONS = { b9: 13, 9: 14, '#9': 15, 11: 17, '#11': 18, b13: 20, 13: 21, b5: 6, '#5': 8, 2: 14, 4: 17, 6: 9, 7: 10 };
+
+function suffixIntervals(suffix) {
+  if (suffix in SUFFIX_ALIASES) return QUALITIES[SUFFIX_ALIASES[suffix]].intervals;
+  for (const quality of Object.values(QUALITIES)) if (quality.suffix === suffix && quality.intervals) return quality.intervals;
+  return null;
+}
+
+// The notes a chord name means: { root, bass, notes } (pitch classes; bass -1 without a slash), or
+// null when the name can't be read. Reads what chordLabel writes, plus common spellings: Cmaj7,
+// CM7, CΔ, C-7, Cø, C°7, C+, Csus, C7(#11), Cmaj7#11, Cadd9, C9(no3), C/E.
+export function parseChordName(text) {
+  const name = text.trim().replace(/♯/g, '#').replace(/♭/g, 'b').replace(/\s+/g, '');
+  if (/^(N\.?C\.?|N)$/i.test(name)) return { root: -1, bass: -1, notes: [] };
+  const match = /^([A-Ga-g])([#b]?)(.*?)(?:\/([A-Ga-g])([#b]?))?$/.exec(name);
+  if (!match) return null;
+  const pc = (letter, accidental) => mod12(NOTE_LETTERS[letter.toUpperCase()] + (accidental === '#' ? 1 : accidental === 'b' ? -1 : 0));
+  const root = pc(match[1], match[2]);
+  let suffix = match[3];
+  // Parenthesized parts: extensions and omissions, as in (#11), (add9), (no5), unless the
+  // parentheses belong to the type's name, as in m(maj7).
+  const tokens = [];
+  if (!suffixIntervals(suffix)) {
+    suffix = suffix.replace(/\(([^)]*)\)/g, (_, inner) => {
+      tokens.push(...inner.split(/[,/]/).filter(Boolean));
+      return '';
+    });
+  }
+  // Extensions written straight after the type (maj7#11, 7add13, m7b5 is a type itself).
+  let intervals = suffixIntervals(suffix);
+  while (!intervals) {
+    const tail = /(add)?(b9|#9|#11|b13|b5|#5|13|11|9)$/.exec(suffix);
+    if (!tail) return null;
+    tokens.unshift(tail[0]);
+    suffix = suffix.slice(0, -tail[0].length);
+    intervals = suffixIntervals(suffix);
+  }
+  const notes = new Set(intervals.map((iv) => mod12(root + iv)));
+  for (const token of tokens) {
+    const omit = /^(no|omit)(3|5)$/.exec(token);
+    if (omit) {
+      for (const iv of omit[2] === '3' ? [3, 4] : [7]) notes.delete(mod12(root + iv));
+      continue;
+    }
+    const extension = EXTENSIONS[token.replace(/^add/, '')];
+    if (extension === undefined) return null;
+    if (extension === 6 || extension === 8) notes.delete(mod12(root + 7));
+    notes.add(mod12(root + extension));
+  }
+  const bass = match[4] ? pc(match[4], match[5]) : -1;
+  if (bass >= 0) notes.add(bass);
+  return { root, bass, notes: [...notes] };
 }
 
 // The pitch classes a chord sounds: its quality's notes plus its bass.

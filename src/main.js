@@ -16,6 +16,7 @@ import {
   nameNotes,
   noteNames,
   parseChordLabel,
+  parseChordName,
   QUALITIES,
   rebuildOnBass,
   refineChanges,
@@ -91,6 +92,7 @@ const ui = {
   trValue: $('tr-value'),
   activeGenerated: $('active-generated'),
   activeCustom: $('active-custom'),
+  rename: $('rename'),
   overlay: $('overlay'),
   stage: $('stage'),
   progress: $('progress-fill'),
@@ -193,6 +195,7 @@ const timeline = new Timeline($('timeline'), {
   onSeek: seek,
   onZoom: (pxPerSec) => (ui.zoom.value = pxPerSec),
   onEdit: editCustom,
+  onSelect: () => (ui.rename.disabled = !timeline.selectedCustomIds().length),
 });
 
 // ---------- Loading & analysis ----------
@@ -780,6 +783,10 @@ function editCustom(action) {
     const bass = chord.bass >= 0 ? chord.bass : chord.root;
     const named = nameNotes([...notes], notes.has(bass) ? bass : -1, chord.root);
     custom = custom.map((c) => (c === chord ? { ...c, ...named, notes: [...notes] } : c));
+  } else if (action.type === 'rename') {
+    const ids = new Set(action.ids);
+    const { root, quality, bass, notes } = action;
+    custom = custom.map((c) => (ids.has(c.id) ? { ...c, root, quality, bass, notes } : c));
   } else if (action.type === 'resize') {
     const chord = custom.find((c) => c.id === action.id);
     if (!chord) return;
@@ -903,6 +910,55 @@ async function importChart(file) {
   redoStack = [];
   customChanged();
   setActive('custom');
+}
+
+// ---------- Renaming custom chords ----------
+
+// While renaming, the Now panel's chord name is a text field for the selected custom chords.
+let renaming = null; // { ids, field }
+
+function startRename() {
+  const ids = timeline.selectedCustomIds();
+  if (!ids.length || renaming) return;
+  const field = Object.assign(document.createElement('input'), { className: 'rename-field', spellcheck: false });
+  field.value = customView.boxes.find((c) => c.id === ids[0])?.label ?? '';
+  ui.now.style.fontSize = ui.now.style.lineHeight = '';
+  ui.now.replaceChildren(field);
+  renaming = { ids, field };
+  field.addEventListener('keydown', (e) => {
+    e.stopPropagation(); // typing isn't a shortcut
+    if (e.key === 'Enter') finishRename(true);
+    else if (e.key === 'Escape') finishRename(false);
+  });
+  field.addEventListener('input', () => field.classList.remove('invalid'));
+  field.addEventListener('blur', () => finishRename(false));
+  field.focus();
+  field.select();
+}
+
+// Applies the typed name (its notes, read back from the name), or cancels. A name that can't be
+// read keeps the field open, marked.
+function finishRename(apply) {
+  if (!renaming) return;
+  const { ids, field } = renaming;
+  if (apply) {
+    const parsed = parseChordName(field.value);
+    if (!parsed) {
+      field.classList.add('invalid');
+      field.select();
+      return;
+    }
+    // The name is read as shown, so with Transpose on it is moved back to the recording's key.
+    const untranspose = (pc) => (pc < 0 ? -1 : (((pc - view.transpose) % 12) + 12) % 12);
+    const root = untranspose(parsed.root);
+    const bass = untranspose(parsed.bass);
+    const notes = parsed.notes.map(untranspose);
+    const named = root < 0 ? { root: -1, quality: 'N', bass: -1 } : nameNotes(notes, bass >= 0 ? bass : root, root);
+    renaming = null;
+    editCustom({ type: 'rename', ids, ...named, notes });
+  }
+  renaming = null;
+  shown = {}; // the Now panel shows the playing chord again
 }
 
 function setActive(row) {
@@ -1036,7 +1092,7 @@ function updatePanel(t) {
   const beat = indexAt(grid.beats, t);
   const next = chords[ci + 1];
 
-  if (ci !== shown.chord) {
+  if (ci !== shown.chord && !renaming) {
     showChord(ui.now, ci >= 0 ? chords[ci].label : '–');
     showChord(ui.next, next ? next.label : '–');
     shown.chord = ci;
@@ -1319,6 +1375,7 @@ ui.chartImport.addEventListener('change', () => {
   if (ui.chartImport.files[0] && analysis) importChart(ui.chartImport.files[0]);
   ui.chartImport.value = '';
 });
+ui.rename.addEventListener('click', startRename);
 ui.activeGenerated.addEventListener('click', () => setActive('generated'));
 ui.activeCustom.addEventListener('click', () => setActive('custom'));
 
@@ -1327,6 +1384,9 @@ window.addEventListener('keydown', (e) => {
   const ctrl = e.ctrlKey || e.metaKey;
   if (!typing && !ctrl && !e.altKey && e.code === 'KeyA') {
     setActive(view.active === 'custom' ? 'generated' : 'custom');
+  } else if (!typing && !ctrl && !e.altKey && e.code === 'KeyR') {
+    e.preventDefault(); // the R doesn't land in the new field
+    startRename();
   } else if (!typing && (e.code === 'Delete' || e.code === 'Backspace')) {
     e.preventDefault();
     const ids = timeline.selectedCustomIds();

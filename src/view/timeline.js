@@ -83,12 +83,14 @@ const keyOf = (row, item, index) => (row === 'custom' ? `c${item.id}` : `g${inde
 // chord at its own times. With the custom timeline active, a click on the chromagram turns that
 // note on or off in the custom chord there. Edits go to `onEdit`.
 export class Timeline {
-  constructor(canvas, { onSeek, onZoom, onEdit }) {
+  constructor(canvas, { onSeek, onZoom, onEdit, onSelect }) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
     this.onSeek = onSeek;
     this.onZoom = onZoom;
     this.onEdit = onEdit;
+    this.onSelect = onSelect;
+    this.shownSelection = '';
     this.pxPerSec = 110;
     this.time = 0;
     this.data = null;
@@ -411,6 +413,12 @@ export class Timeline {
     ctx.fillStyle = COLORS.background;
     ctx.fillRect(0, 0, W, H);
     if (!this.data) return;
+    // Every change of the selection ends in a redraw: report it from here.
+    const selection = [...this.selected].sort().join();
+    if (selection !== this.shownSelection) {
+      this.shownSelection = selection;
+      this.onSelect?.();
+    }
 
     const { duration, beats, bars, peaks, peaksPerSec, active } = this.data;
     const t0 = this.xToTime(0);

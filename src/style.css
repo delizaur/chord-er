@@ -315,6 +315,22 @@ body.dragging .timeline-wrap {
   line-height: 1.1;
 }
 
+.rename-field {
+  width: 100%;
+  padding: 0 8px;
+  border: 2px solid var(--accent);
+  border-radius: 10px;
+  background: var(--panel-2);
+  color: var(--text);
+  font: inherit;
+  line-height: inherit;
+  outline: none;
+}
+
+.rename-field.invalid {
+  border-color: #e05a5a;
+}
+
 .chord-mid {
   font-size: clamp(32px, 5vw, 56px);
   font-weight: 700;
