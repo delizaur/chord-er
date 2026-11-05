@@ -1,4 +1,4 @@
-import { indexAt } from '../analysis/chords.js';
+import { indexAt, QUALITIES } from '../analysis/chords.js';
 
 const PLAYHEAD_RATIO = 0.25; // playhead position as a fraction of the width
 const RULER_HEIGHT = 22;
@@ -61,11 +61,13 @@ function renderChroma({ frameTimes, values }) {
   return { canvas, levels, start: frameTimes[0], step: n > 1 ? frameTimes[1] - frameTimes[0] : 1 };
 }
 
-// Hue follows the circle of fifths so harmonically close chords look alike.
+// Hue follows the circle of fifths so harmonically close chords look alike; chords with a minor
+// third and no major one are darker.
 function chordColor(root, quality, active) {
   if (root < 0) return active ? '#3a3f4d' : '#262a34';
   const hue = ((root * 7) % 12) * 30;
-  const minorish = ['min', 'm7', 'm9', 'm6', 'm7b5', 'dim'].includes(quality);
+  const intervals = QUALITIES[quality]?.intervals ?? [];
+  const minorish = intervals.includes(3) && !intervals.includes(4);
   const sat = minorish ? 38 : 55;
   const light = (minorish ? 30 : 38) + (active ? 14 : 0);
   return `hsl(${hue} ${sat}% ${light}%)`;
@@ -78,7 +80,8 @@ const keyOf = (row, item, index) => (row === 'custom' ? `c${item.id}` : `g${inde
 // generated one, the chromagram and the waveform. Chords are selected with clicks and marquees,
 // dragged from the generated timeline into the custom one (copied), moved within the custom one,
 // dragged out of it (deleted), and resized there by their edges; a double click copies a generated
-// chord at its own times. Edits go to `onEdit`.
+// chord at its own times. With the custom timeline active, a click on the chromagram turns that
+// note on or off in the custom chord there. Edits go to `onEdit`.
 export class Timeline {
   constructor(canvas, { onSeek, onZoom, onEdit }) {
     this.canvas = canvas;
@@ -219,6 +222,18 @@ export class Timeline {
     return best;
   }
 
+  // On the chromagram: { time, pc } of the note under (x, y), or null.
+  noteAt(x, y) {
+    const { chroma } = this.layout();
+    if (y < chroma.top || y >= chroma.top + chroma.height) return null;
+    return { time: this.xToTime(x), pc: 11 - Math.floor(((y - chroma.top) * 12) / chroma.height) };
+  }
+
+  // The custom chord sounding at `t`, or null.
+  customAt(t) {
+    return this.data.custom.find((c) => c.start <= t && t < c.end) ?? null;
+  }
+
   // The selected chords of one row, as { key, index, item }.
   selectedIn(row) {
     return this.data[row].flatMap((item, index) => (this.selected.has(keyOf(row, item, index)) ? [{ index, item }] : []));
@@ -308,7 +323,12 @@ export class Timeline {
         if (g.additive) {
           if (g.wasSelected) this.selected.delete(g.box.key);
         } else this.selected = new Set([g.box.key]);
-      } else if (g.type === 'marquee') this.finishMarquee(g);
+      } else if (g.type === 'marquee') {
+        // A click (no drag) on the chromagram with the custom timeline active edits that chord's notes.
+        const note = this.data.active === 'custom' && Math.hypot(x - g.x, y - g.y) <= DRAG_START ? this.noteAt(x, y) : null;
+        if (note && this.customAt(note.time)) this.onEdit({ type: 'toggle', ...note });
+        else this.finishMarquee(g);
+      }
       else if (g.type === 'drag') this.finishDrag(g, y);
       else if (g.type === 'resize') {
         this.onEdit({ type: 'resize', id: g.item.id, start: g.start, end: g.end });
@@ -349,6 +369,7 @@ export class Timeline {
     let cursor = 'default';
     if (y < RULER_HEIGHT || y >= wave.top) cursor = 'pointer';
     else if (this.edgeAt(x, y)) cursor = 'ew-resize';
+    else if (this.data.active === 'custom' && this.noteAt(x, y) && this.customAt(this.xToTime(x))) cursor = 'pointer';
     else if (this.boxAt(x, y)) cursor = 'grab';
     this.canvas.style.cursor = cursor;
   }

@@ -10,6 +10,13 @@ export function chordVoicing(root, quality) {
   return QUALITIES[quality].intervals.map((iv) => base + iv);
 }
 
+// The same voicing for an explicit set of pitch classes (custom chords), stacked upwards from the root.
+export function notesVoicing(root, notes) {
+  if (root < 0) return [];
+  const base = 60 + root > 66 ? 48 + root : 60 + root;
+  return notes.map((pc) => (((pc - root) % 12) + 12) % 12).sort((a, b) => a - b).map((iv) => base + iv);
+}
+
 const midiToHz = (m) => 440 * 2 ** ((m - 69) / 12);
 
 // Fades out and stops the given voices from `when` (AudioContext time).

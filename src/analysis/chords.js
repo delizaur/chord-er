@@ -611,6 +611,110 @@ export function respellSlash(chord) {
   return chord;
 }
 
+// ---------- Naming any set of notes (custom chords) ----------
+
+// Chord types the namer knows, simplest first, with intervals above the root (extensions written
+// above the octave, for the synth's voicing). Types with a 3rd and a 5th also match without the 5th.
+const NAMEABLE = [
+  ['maj', '', [0, 4, 7]],
+  ['min', 'm', [0, 3, 7]],
+  ['5', '5', [0, 7]],
+  ['sus4', 'sus4', [0, 5, 7]],
+  ['sus2', 'sus2', [0, 2, 7]],
+  ['dim', 'dim', [0, 3, 6]],
+  ['aug', 'aug', [0, 4, 8]],
+  ['7', '7', [0, 4, 7, 10]],
+  ['m7', 'm7', [0, 3, 7, 10]],
+  ['maj7', 'maj7', [0, 4, 7, 11]],
+  ['6', '6', [0, 4, 7, 9]],
+  ['m6', 'm6', [0, 3, 7, 9]],
+  ['m7b5', 'm7b5', [0, 3, 6, 10]],
+  ['dim7', 'dim7', [0, 3, 6, 9]],
+  ['7sus4', '7sus4', [0, 5, 7, 10]],
+  ['mMaj7', 'm(maj7)', [0, 3, 7, 11]],
+  ['add9', 'add9', [0, 4, 7, 14]],
+  ['madd9', 'madd9', [0, 3, 7, 14]],
+  ['add11', 'add11', [0, 4, 7, 17]],
+  ['madd11', 'madd11', [0, 3, 7, 17]],
+  ['m7add11', 'm7(add11)', [0, 3, 7, 10, 17]],
+  ['7b5', '7b5', [0, 4, 6, 10]],
+  ['7#5', '7#5', [0, 4, 8, 10]],
+  ['maj7#5', 'maj7#5', [0, 4, 8, 11]],
+  ['9', '9', [0, 4, 7, 10, 14]],
+  ['m9', 'm9', [0, 3, 7, 10, 14]],
+  ['maj9', 'maj9', [0, 4, 7, 11, 14]],
+  ['69', '6/9', [0, 4, 7, 9, 14]],
+  ['7b9', '7b9', [0, 4, 7, 10, 13]],
+  ['7#9', '7#9', [0, 4, 7, 10, 15]],
+  ['11', '11', [0, 7, 10, 14, 17]],
+  ['m11', 'm11', [0, 3, 7, 10, 14, 17]],
+  ['13', '13', [0, 4, 7, 10, 14, 21]],
+  ['maj13', 'maj13', [0, 4, 7, 11, 14, 21]],
+  ['no5', '(no5)', [0, 4]],
+  ['mno5', 'm(no5)', [0, 3]],
+  ['1', '(no3,5)', [0]],
+];
+for (const [quality, suffix, intervals] of NAMEABLE) QUALITIES[quality] ??= { suffix, intervals };
+
+// Names for notes left over beyond a known chord, by interval above the root.
+const EXTRA_NAMES = { 1: 'b9', 2: '9', 3: '#9', 4: '3', 5: '11', 6: '#11', 7: '5', 8: 'b13', 9: '13', 10: 'b7', 11: '7' };
+const EXTRA_HEIGHT = { 1: 13, 2: 14, 3: 15, 5: 17, 6: 18, 8: 20, 9: 21 };
+
+const pcSet = (intervals) => new Set(intervals.map(mod12));
+
+// The name for a set of pitch classes over a bass note (-1: none given): { root, quality, bass },
+// with bass -1 when the root is the bass. Every note is tried as the root. The fewest notes left
+// over wins (an exact match has none); then the bass as root (no slash), then a type with its 5th
+// over one without, then `preferRoot` (so adding A to a C chord gives C6, not Am7/C), then the
+// simpler type. Notes left over are added to the name, as in C7(#11).
+export function nameNotes(notes, bass = -1, preferRoot = -1) {
+  const set = new Set(notes.map(mod12));
+  if (bass >= 0) set.add(bass);
+  if (!set.size) return { root: -1, quality: 'N', bass: -1 };
+  let best = null;
+  for (const root of set) {
+    const rel = new Set([...set].map((pc) => mod12(pc - root)));
+    NAMEABLE.forEach(([quality, , intervals], rank) => {
+      const type = pcSet(intervals);
+      const omitted = ![...type].every((iv) => rel.has(iv));
+      if (omitted) {
+        // The same type without its 5th, when it has a 3rd and more than three notes.
+        const thirdless = !type.has(3) && !type.has(4);
+        if (thirdless || type.size < 4 || !type.has(7) || rel.has(7)) return;
+        if (![...type].every((iv) => iv === 7 || rel.has(iv))) return;
+      }
+      const extras = [...rel].filter((iv) => !type.has(iv)).sort((a, b) => a - b);
+      const score = [extras.length, bass >= 0 && root !== bass ? 1 : 0, omitted ? 1 : 0, root === preferRoot ? 0 : 1, -type.size, rank];
+      if (!best || compare(score, best.score) < 0) best = { root, quality, extras, score };
+    });
+  }
+  let { quality } = best;
+  if (best.extras.length) {
+    // An unnamed combination: the known chord plus its extra notes, registered as a new quality.
+    const base = QUALITIES[quality];
+    quality = `${quality}(${best.extras.map((iv) => EXTRA_NAMES[iv]).join(',')})`;
+    QUALITIES[quality] ??= {
+      suffix: `${base.suffix}(${best.extras.map((iv) => EXTRA_NAMES[iv]).join(',')})`,
+      intervals: [...base.intervals, ...best.extras.map((iv) => EXTRA_HEIGHT[iv] ?? iv)],
+    };
+  }
+  return { root: best.root, quality, bass: bass >= 0 && bass !== best.root ? bass : -1 };
+}
+
+// Lexicographic comparison of score arrays.
+function compare(a, b) {
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] - b[i];
+  return 0;
+}
+
+// The pitch classes a chord sounds: its quality's notes plus its bass.
+export function chordNotes(root, quality, bass = -1) {
+  if (root < 0) return [];
+  const notes = new Set(QUALITIES[quality].intervals.map((iv) => mod12(root + iv)));
+  if (bass >= 0) notes.add(bass);
+  return [...notes];
+}
+
 export function chordLabel(root, quality, key, bass = -1) {
   if (root < 0) return 'N.C.';
   const names = noteNames(key);

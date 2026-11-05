@@ -4,6 +4,7 @@ import {
   allowedQuality,
   anticipateChanges,
   chordLabel,
+  chordNotes,
   decodeBassLine,
   decodeChords,
   detectKey,
@@ -12,6 +13,7 @@ import {
   keyLabel,
   markPowerChords,
   mergeSimilar,
+  nameNotes,
   noteNames,
   parseChordLabel,
   QUALITIES,
@@ -29,7 +31,7 @@ import { BEAT_FRONTEND_URL, BEAT_MODEL_URL, MODEL_CACHE, SEPARATION_MODEL_URL } 
 import { MODEL_SAMPLE_RATE } from './separation/demucs.js';
 import { mixToWav, toInt16 } from './stemMix.js';
 import { loadStems, saveStems } from './devStemCache.js';
-import { BassSynth, ChordSynth, Metronome, chordVoicing } from './synth.js';
+import { BassSynth, ChordSynth, Metronome, chordVoicing, notesVoicing } from './synth.js';
 import { NoteGraph } from './view/noteGraph.js';
 import { Timeline } from './view/timeline.js';
 
@@ -694,7 +696,7 @@ function mergeSameChord(pieces) {
 // The user's own chord chart: chords copied from the generated timeline, then moved, resized or
 // deleted. They keep their root, quality and bass whatever the settings; only their spelling follows
 // the key and Transpose. Saved per song, keyed by the file's SHA-256.
-let custom = []; // [{ id, start, end, root, quality, bass }], by start, not overlapping
+let custom = []; // [{ id, start, end, root, quality, bass, notes? }], by start, not overlapping
 let nextCustomId = 1;
 let customKey = null; // where the current song's chart is saved
 let songHash = null; // the current file's SHA-256 (hex), which identifies its chart
@@ -723,8 +725,8 @@ function buildCustom() {
       ...c,
       root,
       label: chordLabel(root, c.quality, shownKey, transposeRoot(c.bass, view.transpose)),
-      voicing: chordVoicing(c.root, c.quality),
-      tones: c.root < 0 ? [] : QUALITIES[c.quality].intervals.map((iv) => (c.root + iv) % 12),
+      voicing: c.notes ? notesVoicing(c.root, c.notes) : chordVoicing(c.root, c.quality),
+      tones: c.notes ?? (c.root < 0 ? [] : QUALITIES[c.quality].intervals.map((iv) => (c.root + iv) % 12)),
     };
   });
   customView = {
@@ -767,6 +769,17 @@ function editCustom(action) {
   } else if (action.type === 'delete') {
     const ids = new Set(action.ids);
     custom = custom.filter((c) => !ids.has(c.id));
+  } else if (action.type === 'toggle') {
+    // A note turned on or off from the chromagram; the chord is renamed from its new notes. Its
+    // bass (the root, unless it's a slash chord) stays the bass, unless it was the note removed.
+    const chord = custom.find((c) => c.start <= action.time && action.time < c.end);
+    if (!chord) return;
+    const notes = new Set(notesOf(chord));
+    if (notes.has(action.pc)) notes.delete(action.pc);
+    else notes.add(action.pc);
+    const bass = chord.bass >= 0 ? chord.bass : chord.root;
+    const named = nameNotes([...notes], notes.has(bass) ? bass : -1, chord.root);
+    custom = custom.map((c) => (c === chord ? { ...c, ...named, notes: [...notes] } : c));
   } else if (action.type === 'resize') {
     const chord = custom.find((c) => c.id === action.id);
     if (!chord) return;
@@ -796,10 +809,23 @@ function customChanged({ save = true } = {}) {
   resetSchedule();
 }
 
+// A custom chord's notes: as edited on the chromagram, else those its name implies. (The name alone
+// can't tell: F-A-E is named Fmaj7, but has no C.)
+const notesOf = (c) => c.notes ?? chordNotes(c.root, c.quality, c.bass);
+
+// A custom chord as saved: with its notes, which also let a name the namer made up (C7(#11)) be
+// rebuilt when its quality isn't known yet.
+const storedChord = (c) => ({ start: c.start, end: c.end, root: c.root, quality: c.quality, bass: c.bass, notes: notesOf(c) });
+
+function restoredChord({ start, end, root, quality, bass, notes }) {
+  if (root >= 0 && !QUALITIES[quality]) ({ root, quality, bass } = nameNotes(notes ?? [], bass >= 0 ? bass : root, root));
+  return Array.isArray(notes) ? { start, end, root, quality, bass, notes } : { start, end, root, quality, bass };
+}
+
 function saveCustom() {
   if (!customKey) return;
   try {
-    if (custom.length) localStorage.setItem(customKey, JSON.stringify(custom.map(({ start, end, root, quality, bass }) => ({ start, end, root, quality, bass }))));
+    if (custom.length) localStorage.setItem(customKey, JSON.stringify(custom.map(storedChord)));
     else localStorage.removeItem(customKey);
   } catch {
     // not saved
@@ -819,7 +845,7 @@ async function loadCustom(file, id) {
     // nothing saved, or storage blocked
   }
   if (!saved.length || custom.length) return;
-  custom = saved.map((c) => ({ ...c, id: nextCustomId++ }));
+  custom = saved.map((c) => ({ ...restoredChord(c), id: nextCustomId++ }));
   customChanged({ save: false });
 }
 
@@ -835,13 +861,11 @@ function exportChart() {
     sha256: songHash,
     duration: analysis.duration,
     key: keyLabel(key),
-    chords: custom.map(({ start, end, root, quality, bass }) => ({
-      start: Number(start.toFixed(4)),
-      end: Number(end.toFixed(4)),
-      label: chordLabel(root, quality, key, bass),
-      root,
-      quality,
-      bass,
+    chords: custom.map((c) => ({
+      ...storedChord(c),
+      start: Number(c.start.toFixed(4)),
+      end: Number(c.end.toFixed(4)),
+      label: chordLabel(c.root, c.quality, key, c.bass),
     })),
   };
   const url = URL.createObjectURL(new Blob([JSON.stringify(chart, null, 2)], { type: 'application/json' }));
@@ -865,8 +889,9 @@ async function importChart(file) {
   }
   const pc = (v) => Number.isInteger(v) && v >= -1 && v < 12;
   const chords = chart.chords
-    .filter((c) => Number.isFinite(c.start) && Number.isFinite(c.end) && pc(c.root) && pc(c.bass) && (c.quality === 'N' || QUALITIES[c.quality]))
-    .map((c) => ({ start: Math.max(0, c.start), end: Math.min(analysis.duration, c.end), root: c.root, quality: c.quality, bass: c.bass }))
+    .filter((c) => Number.isFinite(c.start) && Number.isFinite(c.end) && pc(c.root) && pc(c.bass))
+    .filter((c) => c.quality === 'N' || QUALITIES[c.quality] || (Array.isArray(c.notes) && c.notes.every(pc)))
+    .map((c) => ({ ...restoredChord(c), start: Math.max(0, c.start), end: Math.min(analysis.duration, c.end) }))
     .filter((c) => c.end > c.start);
   if (chart.sha256 && songHash && chart.sha256 !== songHash) {
     const made = chart.song ? `“${chart.song}”` : 'a different audio file';
