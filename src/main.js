@@ -1000,37 +1000,35 @@ function toolTargets() {
 // The generated chord (not N.C.) at `t`, as an index, or -1.
 const generatedAt = (t) => song.chords.findIndex((c) => c.root >= 0 && c.start <= t && t < c.end);
 
-// The generated chords Elevate copies: the selected ones, or with nothing selected, the one at the
-// playhead.
-function elevateTargets() {
-  if (!song) return [];
-  if (timeline.selectedCustomIds().length) return timeline.selectedGeneratedIndices();
-  const indices = timeline.selectedGeneratedIndices();
-  if (indices.length) return indices;
-  const index = generatedAt(audio.currentTime);
-  return index >= 0 ? [index] : [];
-}
-
 // Greys out the tools with nothing to act on.
 function updateTools() {
   ui.rename.disabled = !!renaming || !Object.values(toolTargets()).some((list) => list.length);
-  ui.elevate.disabled = !elevateTargets().length;
+  ui.elevate.disabled = !song || generatedAt(audio.currentTime) < 0;
 }
 
+// Elevate copies the generated chord at the playhead to the custom timeline, whatever is selected
+// or active.
 function elevate() {
-  const indices = elevateTargets();
-  if (!indices.length) return;
-  editCustom({ type: 'elevate', indices });
+  if (!song) return;
+  const index = generatedAt(audio.currentTime);
+  if (index >= 0) editCustom({ type: 'elevate', indices: [index] });
 }
 
-// Where a generated chord lands when copied up: its own times, or from the beat nearest to its
-// start, as many beats as Duration says.
+// Where a generated chord lands when copied up: its own times (Same), or as many beats as Duration
+// says, from the beat it starts on, moved back to where a chord that long belongs: the barline for
+// 4 and 8 beats, beat 1 or 3 for 2 beats, any beat for 1.
 function elevatedSpan(chord) {
   if (prefs.duration === 'same') return { start: chord.start, end: chord.end };
-  const start = timeline.snap(chord.start);
-  const beat = indexAt(grid.beats, start + 1e-6);
-  const end = grid.beats[beat + Number(prefs.duration)] ?? analysis.duration;
-  return { start, end: Math.min(end, analysis.duration) };
+  const beats = Number(prefs.duration);
+  const { pos, length } = song.bars;
+  // A chord starting a little before a beat (a quarter beat at most) starts on it.
+  const near = Math.max(0, indexAt(grid.beats, chord.start));
+  const reach = ((grid.beats[near + 1] ?? grid.beats[near] + 0.5) - grid.beats[near]) / 4;
+  let beat = Math.max(0, indexAt(grid.beats, chord.start + reach));
+  const step = Math.min(beats, length[beat]);
+  while (beat > 0 && pos[beat] % step !== 0) beat--;
+  const end = grid.beats[beat + beats] ?? analysis.duration;
+  return { start: grid.beats[beat], end: Math.min(end, analysis.duration) };
 }
 
 const DURATIONS = ['1', '2', '4', '8', 'same'];
