@@ -439,6 +439,10 @@ body.dragging .timeline-wrap {
   border-left: 1px solid var(--border);
 }
 
+.segmented.compact button {
+  padding: 6px 9px;
+}
+
 .segmented button.on {
   background: var(--accent);
   color: var(--accent-ink);

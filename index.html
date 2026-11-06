@@ -76,7 +76,15 @@
                 <button id="active-generated" class="on">Generated</button>
                 <button id="active-custom">Custom</button>
               </div>
-              <button id="rename" class="button small-text" disabled title="Rename the selected custom chord(s): type a chord name and press Enter (R)">Rename</button>
+              <button id="elevate" class="button small-text" disabled title="Copy the selected generated chord(s), or the one at the playhead, to the custom timeline, as long as Duration says (E)">Elevate</button>
+              <button id="rename" class="button small-text" disabled title="Rename the selected chord(s), or the one at the playhead: type a chord name and press Enter (R)">Rename</button>
+              <div id="duration" class="segmented compact" title="Duration: how many beats a generated chord gets when copied to the custom timeline (Elevate, double-click); Same keeps its own length. Cycle with D.">
+                <button data-beats="1">1</button>
+                <button data-beats="2">2</button>
+                <button data-beats="4">4</button>
+                <button data-beats="8">8</button>
+                <button data-beats="same">Same</button>
+              </div>
             </div>
             <div class="group controls">
               <label>

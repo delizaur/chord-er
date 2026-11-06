@@ -93,6 +93,8 @@ const ui = {
   activeGenerated: $('active-generated'),
   activeCustom: $('active-custom'),
   rename: $('rename'),
+  elevate: $('elevate'),
+  duration: $('duration'),
   overlay: $('overlay'),
   stage: $('stage'),
   progress: $('progress-fill'),
@@ -118,6 +120,7 @@ const DEFAULTS = {
   early: true, // start a chord where the bass already moved to it (Bb/D → Dm becomes an early Dm)
   rebuild: false, // experimental: re-read slash chords as in-key chords rooted on the bass
   merge: false, // merge neighbouring chords that differ only in quality (Bm, Bm7) into the best fit
+  duration: 'same', // beats a generated chord gets when copied up ('1', '2', '4', '8'), or its own length
   mixer: {
     music: channel(100),
     click: channel(0),
@@ -195,7 +198,7 @@ const timeline = new Timeline($('timeline'), {
   onSeek: seek,
   onZoom: (pxPerSec) => (ui.zoom.value = pxPerSec),
   onEdit: editCustom,
-  onSelect: () => (ui.rename.disabled = !timeline.selectedCustomIds().length),
+  onSelect: () => updateTools(),
 });
 
 // ---------- Loading & analysis ----------
@@ -761,8 +764,13 @@ function editCustom(action) {
   if (!analysis) return;
   const before = custom;
   let ids;
-  if (action.type === 'place') {
-    const items = action.items.map(({ index, start, end }) => ({ id: nextCustomId++, start, end, ...song.chords[index].chord }));
+  if (action.type === 'elevate') {
+    const items = action.indices.map((i) => ({ ...song.chords[i].chord, id: nextCustomId++, ...elevatedSpan(song.chords[i]) }));
+    ids = items.map((c) => c.id);
+    custom = placeAll(custom, items);
+  } else if (action.type === 'place') {
+    // Generated chords (by index) or chords given as they are (pasted).
+    const items = action.items.map(({ index, start, end, chord }) => ({ ...(chord ?? song.chords[index].chord), id: nextCustomId++, start, end }));
     ids = items.map((c) => c.id);
     custom = placeAll(custom, items);
   } else if (action.type === 'move') {
@@ -775,8 +783,14 @@ function editCustom(action) {
   } else if (action.type === 'toggle') {
     // A note turned on or off from the chromagram; the chord is renamed from its new notes. Its
     // bass (the root, unless it's a slash chord) stays the bass, unless it was the note removed.
-    const chord = custom.find((c) => c.start <= action.time && action.time < c.end);
-    if (!chord) return;
+    let chord = custom.find((c) => c.start <= action.time && action.time < c.end);
+    if (!chord) {
+      // Over a gap, the generated chord there is copied first (in the same edit).
+      const generated = song.chords.find((c) => c.chord.root >= 0 && c.start <= action.time && action.time < c.end);
+      if (!generated) return;
+      chord = { ...generated.chord, id: nextCustomId++, start: generated.start, end: generated.end };
+      custom = placeAll(custom, [chord]);
+    }
     const notes = new Set(notesOf(chord));
     if (notes.has(action.pc)) notes.delete(action.pc);
     else notes.add(action.pc);
@@ -784,9 +798,13 @@ function editCustom(action) {
     const named = nameNotes([...notes], notes.has(bass) ? bass : -1, chord.root);
     custom = custom.map((c) => (c === chord ? { ...c, ...named, notes: [...notes] } : c));
   } else if (action.type === 'rename') {
-    const ids = new Set(action.ids);
+    // Generated chords among them (by index) are copied to the custom timeline first.
     const { root, quality, bass, notes } = action;
-    custom = custom.map((c) => (ids.has(c.id) ? { ...c, root, quality, bass, notes } : c));
+    const copies = (action.indices ?? []).map((i) => ({ id: nextCustomId++, ...elevatedSpan(song.chords[i]) }));
+    if (copies.length) custom = placeAll(custom, copies);
+    ids = [...action.ids, ...copies.map((c) => c.id)];
+    const renamed = new Set(ids);
+    custom = custom.map((c) => (renamed.has(c.id) ? { ...c, root, quality, bass, notes } : c));
   } else if (action.type === 'resize') {
     const chord = custom.find((c) => c.id === action.id);
     if (!chord) return;
@@ -914,17 +932,18 @@ async function importChart(file) {
 
 // ---------- Renaming custom chords ----------
 
-// While renaming, the Now panel's chord name is a text field for the selected custom chords.
-let renaming = null; // { ids, field }
+// While renaming, the Now panel's chord name is a text field for the selected chords. Selected
+// generated chords are copied to the custom timeline when the name is applied.
+let renaming = null; // { ids, indices, field }
 
 function startRename() {
-  const ids = timeline.selectedCustomIds();
-  if (!ids.length || renaming) return;
+  const { ids, indices } = toolTargets();
+  if ((!ids.length && !indices.length) || renaming) return;
   const field = Object.assign(document.createElement('input'), { className: 'rename-field', spellcheck: false });
-  field.value = customView.boxes.find((c) => c.id === ids[0])?.label ?? '';
+  field.value = (ids.length ? customView.boxes.find((c) => c.id === ids[0])?.label : song.chords[indices[0]]?.label) ?? '';
   ui.now.style.fontSize = ui.now.style.lineHeight = '';
   ui.now.replaceChildren(field);
-  renaming = { ids, field };
+  renaming = { ids, indices, field };
   field.addEventListener('keydown', (e) => {
     e.stopPropagation(); // typing isn't a shortcut
     if (e.key === 'Enter') finishRename(true);
@@ -940,7 +959,7 @@ function startRename() {
 // read keeps the field open, marked.
 function finishRename(apply) {
   if (!renaming) return;
-  const { ids, field } = renaming;
+  const { ids, indices, field } = renaming;
   if (apply) {
     const parsed = parseChordName(field.value);
     if (!parsed) {
@@ -955,10 +974,104 @@ function finishRename(apply) {
     const notes = parsed.notes.map(untranspose);
     const named = root < 0 ? { root: -1, quality: 'N', bass: -1 } : nameNotes(notes, bass >= 0 ? bass : root, root);
     renaming = null;
-    editCustom({ type: 'rename', ids, ...named, notes });
+    const renamed = editCustom({ type: 'rename', ids, indices, ...named, notes });
+    if (indices.length && renamed) timeline.select('custom', renamed);
   }
   renaming = null;
   shown = {}; // the Now panel shows the playing chord again
+}
+
+// ---------- Tools ----------
+
+// The chords a tool acts on: the selected ones, or else the one at the playhead (in the active
+// timeline; over a gap in the custom one, the generated chord there). { ids (custom), indices
+// (generated) }
+function toolTargets() {
+  const ids = timeline.selectedCustomIds();
+  const indices = timeline.selectedGeneratedIndices();
+  if (ids.length || indices.length || !song) return { ids, indices };
+  const t = audio.currentTime;
+  const here = view.active === 'custom' ? custom.find((c) => c.start <= t && t < c.end) : null;
+  if (here) return { ids: [here.id], indices: [] };
+  const index = generatedAt(t);
+  return { ids: [], indices: index >= 0 ? [index] : [] };
+}
+
+// The generated chord (not N.C.) at `t`, as an index, or -1.
+const generatedAt = (t) => song.chords.findIndex((c) => c.root >= 0 && c.start <= t && t < c.end);
+
+// The generated chords Elevate copies: the selected ones, or with nothing selected, the one at the
+// playhead.
+function elevateTargets() {
+  if (!song) return [];
+  if (timeline.selectedCustomIds().length) return timeline.selectedGeneratedIndices();
+  const indices = timeline.selectedGeneratedIndices();
+  if (indices.length) return indices;
+  const index = generatedAt(audio.currentTime);
+  return index >= 0 ? [index] : [];
+}
+
+// Greys out the tools with nothing to act on.
+function updateTools() {
+  ui.rename.disabled = !!renaming || !Object.values(toolTargets()).some((list) => list.length);
+  ui.elevate.disabled = !elevateTargets().length;
+}
+
+function elevate() {
+  const indices = elevateTargets();
+  if (!indices.length) return;
+  editCustom({ type: 'elevate', indices });
+}
+
+// Where a generated chord lands when copied up: its own times, or from the beat nearest to its
+// start, as many beats as Duration says.
+function elevatedSpan(chord) {
+  if (prefs.duration === 'same') return { start: chord.start, end: chord.end };
+  const start = timeline.snap(chord.start);
+  const beat = indexAt(grid.beats, start + 1e-6);
+  const end = grid.beats[beat + Number(prefs.duration)] ?? analysis.duration;
+  return { start, end: Math.min(end, analysis.duration) };
+}
+
+const DURATIONS = ['1', '2', '4', '8', 'same'];
+
+function setDuration(value) {
+  prefs.duration = value;
+  savePrefs();
+  for (const button of ui.duration.querySelectorAll('button')) button.classList.toggle('on', button.dataset.beats === value);
+}
+
+// ---------- Copy and paste ----------
+
+// The copied chords, by start: { offset (from the first one's start), length, chord }, where chord
+// is { root, quality, bass, notes? } in the recording's key.
+let clipboard = [];
+
+function copyChords() {
+  const picked = [
+    ...custom.filter((c) => timeline.selectedCustomIds().includes(c.id)),
+    ...timeline.selectedGeneratedIndices().map((i) => ({ start: song.chords[i].start, end: song.chords[i].end, ...song.chords[i].chord })),
+  ].sort((a, b) => a.start - b.start);
+  if (!picked.length) return;
+  clipboard = picked.map(({ start, end, root, quality, bass, notes }) => ({
+    offset: start - picked[0].start,
+    length: end - start,
+    chord: notes ? { root, quality, bass, notes } : { root, quality, bass },
+  }));
+}
+
+// Pastes the copied chords at the playhead, snapped to the nearest beat (each edge on a beat), and
+// moves the playhead to their end.
+function pasteChords() {
+  if (!analysis || !clipboard.length) return;
+  const at = timeline.snap(audio.currentTime);
+  const items = clipboard
+    .map(({ offset, length, chord }) => ({ chord, start: timeline.snap(at + offset), end: timeline.snap(at + offset + length) }))
+    .filter((c) => c.end > c.start);
+  if (!items.length) return;
+  const ids = editCustom({ type: 'place', items });
+  if (ids) timeline.select('custom', ids);
+  seek(Math.max(...items.map((c) => c.end)));
 }
 
 function setActive(row) {
@@ -1209,6 +1322,7 @@ function frame() {
     const t = playbackTime();
     timeline.setTime(t);
     updatePanel(t);
+    updateTools();
     schedule();
     const { chords, bass } = activeTrack();
     noteGraph.update(t, chords[indexAt(chords, t, (c) => c.start)]?.tones, bass[indexAt(bass, t, (b) => b.start)]?.pc ?? -1);
@@ -1376,6 +1490,11 @@ ui.chartImport.addEventListener('change', () => {
   ui.chartImport.value = '';
 });
 ui.rename.addEventListener('click', startRename);
+ui.elevate.addEventListener('click', elevate);
+ui.duration.addEventListener('click', (e) => {
+  if (e.target.dataset?.beats) setDuration(e.target.dataset.beats);
+});
+setDuration(DURATIONS.includes(prefs.duration) ? prefs.duration : 'same');
 ui.activeGenerated.addEventListener('click', () => setActive('generated'));
 ui.activeCustom.addEventListener('click', () => setActive('custom'));
 
@@ -1384,9 +1503,19 @@ window.addEventListener('keydown', (e) => {
   const ctrl = e.ctrlKey || e.metaKey;
   if (!typing && !ctrl && !e.altKey && e.code === 'KeyA') {
     setActive(view.active === 'custom' ? 'generated' : 'custom');
+  } else if (!typing && !ctrl && !e.altKey && e.code === 'KeyE') {
+    elevate();
+  } else if (!typing && !ctrl && !e.altKey && e.code === 'KeyD') {
+    setDuration(DURATIONS[(DURATIONS.indexOf(prefs.duration) + 1) % DURATIONS.length]);
   } else if (!typing && !ctrl && !e.altKey && e.code === 'KeyR') {
     e.preventDefault(); // the R doesn't land in the new field
     startRename();
+  } else if (!typing && ctrl && !e.altKey && e.code === 'KeyC') {
+    if (window.getSelection()?.toString()) return; // copying page text
+    copyChords();
+  } else if (!typing && ctrl && !e.altKey && e.code === 'KeyV') {
+    e.preventDefault();
+    pasteChords();
   } else if (!typing && (e.code === 'Delete' || e.code === 'Backspace')) {
     e.preventDefault();
     const ids = timeline.selectedCustomIds();

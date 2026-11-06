@@ -145,6 +145,11 @@ export class Timeline {
     return [...this.selected].filter((key) => key[0] === 'c').map((key) => Number(key.slice(1)));
   }
 
+  // The indices of the selected generated chords.
+  selectedGeneratedIndices() {
+    return this.selectedIn('generated').map(({ index }) => index);
+  }
+
   get playX() {
     return Math.round(this.width * PLAYHEAD_RATIO);
   }
@@ -326,9 +331,11 @@ export class Timeline {
           if (g.wasSelected) this.selected.delete(g.box.key);
         } else this.selected = new Set([g.box.key]);
       } else if (g.type === 'marquee') {
-        // A click (no drag) on the chromagram with the custom timeline active edits that chord's notes.
+        // A click (no drag) on the chromagram with the custom timeline active edits that chord's notes
+        // (where there's none, the generated chord there is copied first).
         const note = this.data.active === 'custom' && Math.hypot(x - g.x, y - g.y) <= DRAG_START ? this.noteAt(x, y) : null;
-        if (note && this.customAt(note.time)) this.onEdit({ type: 'toggle', ...note });
+        const over = (c) => c.root >= 0 && c.start <= note.time && note.time < c.end;
+        if (note && (this.customAt(note.time) || this.data.generated.some(over))) this.onEdit({ type: 'toggle', ...note });
         else this.finishMarquee(g);
       }
       else if (g.type === 'drag') this.finishDrag(g, y);
@@ -338,11 +345,11 @@ export class Timeline {
       this.updateCursor(x, y);
       this.draw();
     });
-    // Double-clicking a generated chord copies it to the custom timeline at the same times.
+    // Double-clicking a generated chord copies it to the custom timeline (as Elevate does).
     canvas.addEventListener('dblclick', (e) => {
       const box = this.boxAt(e.offsetX, e.offsetY);
       if (box?.row !== 'generated') return;
-      const ids = this.onEdit({ type: 'place', items: [{ index: box.index, start: box.item.start, end: box.item.end }] });
+      const ids = this.onEdit({ type: 'elevate', indices: [box.index] });
       if (ids) this.select('custom', ids);
     });
     canvas.addEventListener('pointercancel', () => {
