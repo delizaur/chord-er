@@ -205,7 +205,9 @@ function downbeatPhase(path, beatsPerBar) {
 // a plain time grid (see timeSlots): chords may change on any slot at the same cost, and it
 // has no bars.
 // `vocabulary` lists the allowed qualities (see vocabularyFor).
-export function decodeChords(grid, key, { vocabulary, smoothing, beatsPerBar, keyBias = KEY_BIAS }) {
+// `span`, a number of beats, gives every group of that many beats (from the first downbeat on) its
+// best-fitting chord instead.
+export function decodeChords(grid, key, { vocabulary, smoothing, beatsPerBar, keyBias = KEY_BIAS, span = 0 }) {
   const { beats, duration } = grid;
   const n = beats.length;
   const states = buildStates(vocabulary, key, keyBias);
@@ -225,6 +227,7 @@ export function decodeChords(grid, key, { vocabulary, smoothing, beatsPerBar, ke
     downbeats = Uint8Array.from(beats, (_, i) => beatInBar(i, phase, beatsPerBar) === 0);
   }
   const bars = barInfo(downbeats);
+  if (span) return { chords: segments(fixedSpans(em, S, bars, span), states, beats, duration), bars };
   // Chord changes are cheapest on downbeats and dearest off the main beats of the bar.
   const path = viterbi(em, n, S, (i) => {
     const pos = bars.pos[i];
@@ -235,6 +238,41 @@ export function decodeChords(grid, key, { vocabulary, smoothing, beatsPerBar, ke
   });
 
   return { chords: segments(path, states, beats, duration), bars };
+}
+
+// The best state for each group of `span` beats, counted from the first downbeat (the beats before
+// it form a group of their own): the one that fits all its beats best.
+function fixedSpans(em, S, bars, span) {
+  const n = bars.pos.length;
+  const first = Math.max(0, bars.pos.indexOf(0));
+  const path = new Int32Array(n);
+  const starts = first > 0 ? [0] : [];
+  for (let i = first; i < n; i += span) starts.push(i);
+  starts.forEach((start, k) => {
+    const end = starts[k + 1] ?? n;
+    let best = 0;
+    let bestScore = -Infinity;
+    for (let s = 0; s < S; s++) {
+      let score = 0;
+      for (let i = start; i < end; i++) score += em[i * S + s];
+      if (score > bestScore) [best, bestScore] = [s, score];
+    }
+    path.fill(best, start, end);
+  });
+  return path;
+}
+
+// The chords' bass notes, without splitting them: the bass note heard on most of each chord's beats
+// (-1 when that is its root or unclear, so no slash is shown).
+export function dominantBass(chords, bassLine, beats) {
+  return chords.map((chord, k) => {
+    const endBeat = k + 1 < chords.length ? chords[k + 1].startBeat : beats.length;
+    const counts = new Array(12).fill(0);
+    for (let i = chord.startBeat; i < endBeat; i++) if (bassLine[i] >= 0) counts[bassLine[i]]++;
+    const most = Math.max(...counts);
+    const bass = counts.indexOf(most);
+    return { ...chord, bass: chord.root < 0 || most === 0 || bass === chord.root ? -1 : bass };
+  });
 }
 
 // Runs of equal states → chord segments with start/end times and the index of the first beat.

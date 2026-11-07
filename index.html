@@ -158,6 +158,18 @@
               </select>
             </label>
             <div id="chorder-options" class="suboptions">
+              <label class="field" title="How long chords last. Auto: chords change wherever the harmony does. A number of beats: from the first downbeat on, every group of that many beats gets the one allowed chord that fits it best, for songs with a very regular harmonic rhythm.">
+                <span>Chord duration</span>
+                <select id="chord-beats">
+                  <option value="0">Auto</option>
+                  <option value="1">1 beat</option>
+                  <option value="2">2 beats</option>
+                  <option value="3">3 beats</option>
+                  <option value="4">4 beats</option>
+                  <option value="6">6 beats</option>
+                  <option value="8">8 beats</option>
+                </select>
+              </label>
               <label class="field" title="How readily chords and bass notes change. Raise it if the chart flickers, lower it if quick changes are missed. Above the middle, short slash chords are also left out.">
                 <span>Smoothing</span>
                 <input id="smoothing" type="range" min="0" max="10" step="0.5" value="5" />

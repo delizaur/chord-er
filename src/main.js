@@ -17,6 +17,7 @@ import {
   noteNames,
   parseChordLabel,
   parseChordName,
+  dominantBass,
   QUALITIES,
   rebuildOnBass,
   refineChanges,
@@ -64,6 +65,7 @@ const ui = {
   chordinoInputs: [...document.querySelectorAll('[data-chordino]')],
   chordinoReset: $('chordino-reset'),
   smoothing: $('smoothing'),
+  chordBeats: $('chord-beats'),
   keyBias: $('key-bias'),
   allow: [...document.querySelectorAll('[data-allow]')],
   slash: $('slash'),
@@ -110,6 +112,7 @@ const DEFAULTS = {
   tempo: 'steady', // beat grid from a steady-tempo candidate, or 'ai' (Beat This!)
   beatsPerBar: 4,
   detector: 'chorder', // 'chorder' or 'chordino'
+  chordBeats: 0, // chord-er: 0 = chords change wherever the harmony does, else every so many beats
   smoothing: 5,
   keyBias: 5, // slider value; the score bonus for chords that fit the key is × 0.02
   // Chordino's parameters, at its defaults (as in Sonic Visualiser). tuning: 0 global, 1 local.
@@ -594,12 +597,14 @@ function refresh() {
     smoothing: prefs.smoothing,
     beatsPerBar: prefs.beatsPerBar,
     keyBias: prefs.keyBias * 0.02,
+    span: prefs.chordBeats,
   };
   let { chords, bars } = decodeChords(grid, key, decoding);
   const free = chordTimingIsFree();
   const bassFrames = analysis.bassStem ?? frames;
   let chordGrid = grid;
-  if (free) {
+  // A fixed chord duration counts beats, so it keeps the beat grid even with free timing.
+  if (free && !prefs.chordBeats) {
     const slots = timeSlots(duration);
     chordGrid = { duration, beats: slots, downbeats: null, uniform: true, ...beatSync(slots, duration, frames, bassFrames) };
     ({ chords } = decodeChords(chordGrid, key, decoding));
@@ -619,11 +624,16 @@ function refresh() {
     // Pieces of constant chord and bass note. The bass line needs the bass stem: in the full mix
     // the kick drum reads as bass notes.
     const detectedBass = analysis.bassStem ? decodeBassLine(chordGrid, prefs.smoothing) : null;
-    pieces = detectedBass ? splitByBass(chords, detectedBass, chordGrid.beats) : chords.map((c) => ({ ...c, bass: -1 }));
-    if (free) pieces = refineChanges(pieces, frames, bassFrames);
-    const beatLength = 60 / medianBpm(beats);
-    if (detectedBass && prefs.slash && prefs.early) pieces = anticipateChanges(pieces, beatLength);
-    pieces = dropShortSlashes(pieces, prefs.smoothing, beatLength);
+    if (prefs.chordBeats) {
+      // Fixed durations stay fixed: each chord takes the bass note heard most under it.
+      pieces = detectedBass ? dominantBass(chords, detectedBass, chordGrid.beats) : chords.map((c) => ({ ...c, bass: -1 }));
+    } else {
+      pieces = detectedBass ? splitByBass(chords, detectedBass, chordGrid.beats) : chords.map((c) => ({ ...c, bass: -1 }));
+      if (free) pieces = refineChanges(pieces, frames, bassFrames);
+      const beatLength = 60 / medianBpm(beats);
+      if (detectedBass && prefs.slash && prefs.early) pieces = anticipateChanges(pieces, beatLength);
+      pieces = dropShortSlashes(pieces, prefs.smoothing, beatLength);
+    }
   }
   // The bass synth plays each piece's bass note (the root where the bass is unclear).
   song = { bass: pieces.map((p) => ({ start: p.start, pc: p.bass >= 0 ? p.bass : p.root })) };
@@ -1350,6 +1360,7 @@ function syncControls() {
     showChordinoValue(input);
   }
   ui.smoothing.value = prefs.smoothing;
+  ui.chordBeats.value = String(prefs.chordBeats);
   ui.keyBias.value = prefs.keyBias;
   for (const box of ui.allow) box.checked = prefs.allowed[box.dataset.allow];
   ui.slash.checked = prefs.slash;
@@ -1407,6 +1418,10 @@ ui.meter.addEventListener('change', () => {
 });
 ui.detector.addEventListener('change', () => {
   prefs.detector = ui.detector.value;
+  changed();
+});
+ui.chordBeats.addEventListener('change', () => {
+  prefs.chordBeats = Number(ui.chordBeats.value);
   changed();
 });
 ui.smoothing.addEventListener('input', () => {
