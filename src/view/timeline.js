@@ -308,9 +308,11 @@ export class Timeline {
       } else if (g.type === 'marquee') {
         Object.assign(g, { x1: x, y1: y });
       } else if (g.type === 'resize') {
-        // The boundary stays inside the two chords it separates.
-        const t = e.shiftKey ? this.xToTime(x) : this.snap(this.xToTime(x));
-        g.time = Math.max(g.left.start + 0.05, Math.min(t, g.right.end - 0.05));
+        // The boundary stays within the two chords it separates. Their far edges are snap points
+        // too: dragging it onto one covers that chord entirely.
+        let t = e.shiftKey ? this.xToTime(x) : this.snap(this.xToTime(x));
+        for (const edge of [g.left.start, g.right.end]) if (Math.abs(this.timeToX(edge) - x) <= 2 * EDGE_GRAB) t = edge;
+        g.time = Math.max(g.left.start, Math.min(t, g.right.end));
       }
       this.draw();
     });

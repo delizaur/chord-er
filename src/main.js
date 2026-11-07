@@ -836,12 +836,20 @@ function editChords(action) {
     frozen = frozen.map((c) => (renamed.has(c.id) ? { ...c, root, quality, bass, notes } : c));
   } else if (action.type === 'resize') {
     // The boundary between two neighbouring chords moved from `from` to `time`: the chord that
-    // grows freezes and takes the span over; the other one gives it up.
-    const grower = trackItem(action.time > action.from ? action.left : action.right);
-    if (!grower) return;
+    // grows freezes and takes the span over; the other one gives it up. What would be left of the
+    // other one, if shorter than a quarter beat, goes too.
+    const growsRight = action.time > action.from;
+    const grower = trackItem(growsRight ? action.left : action.right);
+    const shrinker = trackItem(growsRight ? action.right : action.left);
+    if (!grower || !shrinker) return;
+    const beat = Math.max(0, indexAt(grid.beats, action.time));
+    const minimum = ((grid.beats[beat + 1] ?? grid.beats[beat] + 0.5) - grid.beats[beat]) / 4;
+    let time = action.time;
+    if (growsRight && shrinker.end - time < minimum) time = shrinker.end;
+    if (!growsRight && time - shrinker.start < minimum) time = shrinker.start;
     ids = freezeAsShown([grower]);
     const chord = frozen.find((c) => c.id === ids[0]);
-    const resized = action.time > action.from ? { ...chord, end: action.time } : { ...chord, start: action.time };
+    const resized = growsRight ? { ...chord, end: time } : { ...chord, start: time };
     frozen = placeAll(frozen.filter((c) => c !== chord), [resized]);
   }
   if (frozen === before) return [];
