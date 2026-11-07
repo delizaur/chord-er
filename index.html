@@ -72,13 +72,8 @@
             <div class="group">
               <button id="play" class="button primary round" title="Play / pause (Space)">▶</button>
               <span id="time" class="time">0:00 / 0:00</span>
-              <div class="segmented" title="The active chord timeline: the synths, Now / Next, the notes graph and the chromagram highlights follow it. Switch with A.">
-                <button id="active-generated" class="on">Generated</button>
-                <button id="active-custom">Custom</button>
-              </div>
-              <button id="elevate" class="button small-text" disabled title="Copy the generated chord at the playhead to the custom timeline, as long as Duration says (E)">Elevate</button>
-              <button id="rename" class="button small-text" disabled title="Rename the selected chord(s), or the one at the playhead: type a chord name and press Enter (R)">Rename</button>
-              <div id="duration" class="segmented compact" title="Duration: how many beats a generated chord gets when copied to the custom timeline (Elevate, double-click); Same keeps its own length. Cycle with D.">
+              <button id="rename" class="button small-text" disabled title="Rename the selected chord(s), or the one at the playhead: type a chord name and press Enter (R). Renamed chords freeze.">Rename</button>
+              <div id="duration" class="segmented compact" title="Duration: how many beats a chord gets when frozen with F or a double click; Same keeps its own times. Cycle with D.">
                 <button data-beats="1">1</button>
                 <button data-beats="2">2</button>
                 <button data-beats="4">4</button>

@@ -2,7 +2,7 @@ import { indexAt, QUALITIES } from '../analysis/chords.js';
 
 const PLAYHEAD_RATIO = 0.25; // playhead position as a fraction of the width
 const RULER_HEIGHT = 22;
-const EDGE_GRAB = 6; // px around a custom chord's edge that grab it for resizing
+const EDGE_GRAB = 6; // px around the boundary between two chords that grab it for resizing
 const DRAG_START = 3; // px the pointer moves before a press becomes a drag
 
 const COLORS = {
@@ -19,8 +19,7 @@ const COLORS = {
   selected: '#ffcc4d',
   marquee: 'rgba(255,204,77,0.12)',
   remove: '#e05a5a',
-  emptyRow: 'rgba(255,255,255,0.18)',
-  rowTag: 'rgba(17,19,26,0.85)',
+  frozen: '#ffffff',
   chromaRule: 'rgba(255,255,255,0.05)',
   chromaLabels: 'rgba(17,19,26,0.8)',
   chordTone: 'rgba(255,204,77,0.45)',
@@ -62,26 +61,22 @@ function renderChroma({ frameTimes, values }) {
 }
 
 // Hue follows the circle of fifths so harmonically close chords look alike; chords with a minor
-// third and no major one are darker.
-function chordColor(root, quality, active) {
-  if (root < 0) return active ? '#3a3f4d' : '#262a34';
+// third and no major one are darker. Frozen chords are paler, nearer white.
+function chordColor(root, quality, sounding, frozen) {
+  if (root < 0) return frozen ? (sounding ? '#5a5f6c' : '#474b57') : sounding ? '#3a3f4d' : '#262a34';
   const hue = ((root * 7) % 12) * 30;
   const intervals = QUALITIES[quality]?.intervals ?? [];
   const minorish = intervals.includes(3) && !intervals.includes(4);
-  const sat = minorish ? 38 : 55;
-  const light = (minorish ? 30 : 38) + (active ? 14 : 0);
+  const sat = (minorish ? 38 : 55) * (frozen ? 0.6 : 1);
+  const light = (minorish ? 30 : 38) + (sounding ? 14 : 0) + (frozen ? 20 : 0);
   return `hsl(${hue} ${sat}% ${light}%)`;
 }
 
-// Selection keys: generated chords by index, custom chords by id.
-const keyOf = (row, item, index) => (row === 'custom' ? `c${item.id}` : `g${index}`);
-
-// Canvas view that scrolls the song past a fixed playhead: the custom chord timeline above the
-// generated one, the chromagram and the waveform. Chords are selected with clicks and marquees,
-// dragged from the generated timeline into the custom one (copied), moved within the custom one,
-// dragged out of it (deleted), and resized there by their edges; a double click copies a generated
-// chord at its own times. With the custom timeline active, a click on the chromagram turns that
-// note on or off in the custom chord there. Edits go to `onEdit`.
+// Canvas view that scrolls the song past a fixed playhead: the chord timeline, the chromagram and
+// the waveform. Chords (frozen or not; each has a selection `key`) are selected with clicks and
+// marquees, moved by dragging, deleted by dragging them off the timeline, and resized by dragging
+// the boundary between two chords; a double click freezes or unfreezes a chord, and a click on the
+// chromagram turns that note on or off in the chord there. Edits go to `onEdit`.
 export class Timeline {
   constructor(canvas, { onSeek, onZoom, onEdit, onSelect }) {
     this.canvas = canvas;
@@ -102,19 +97,17 @@ export class Timeline {
     this.bindInput();
   }
 
-  // Merges `data` into the shown data: { duration, beats, bars, generated, custom, active
-  // ('generated' or 'custom'), overlay: { chords, bass } (the active chords, for the chromagram),
-  // chroma: { frameTimes, values, names }, peaks, peaksPerSec }.
+  // Merges `data` into the shown data: { duration, beats, bars, chords, overlay: { chords, bass }
+  // (for the chromagram), chroma: { frameTimes, values, names }, peaks, peaksPerSec }.
   setData(data) {
     if (data.chroma && data.chroma.values !== this.chromaValues) {
       this.chromaValues = data.chroma.values;
       this.chromaImage = renderChroma(data.chroma);
     }
-    // Generated chords are rebuilt on every settings change; a selection of them doesn't carry over.
-    if (data.generated) for (const key of [...this.selected]) if (key[0] === 'g') this.selected.delete(key);
-    if (data.custom) {
-      const ids = new Set(data.custom.map((c) => `c${c.id}`));
-      for (const key of [...this.selected]) if (key[0] === 'c' && !ids.has(key)) this.selected.delete(key);
+    // Chords that are gone (rebuilt by a settings change, or frozen) leave the selection.
+    if (data.chords) {
+      const keys = new Set(data.chords.map((c) => c.key));
+      for (const key of [...this.selected]) if (!keys.has(key)) this.selected.delete(key);
     }
     this.data = { ...this.data, ...data };
     this.draw();
@@ -131,8 +124,8 @@ export class Timeline {
     this.draw();
   }
 
-  select(row, ids) {
-    this.selected = new Set(ids.map((id) => (row === 'custom' ? `c${id}` : `g${id}`)));
+  select(keys = []) {
+    this.selected = new Set(keys);
     this.draw();
   }
 
@@ -141,13 +134,8 @@ export class Timeline {
     this.draw();
   }
 
-  selectedCustomIds() {
-    return [...this.selected].filter((key) => key[0] === 'c').map((key) => Number(key.slice(1)));
-  }
-
-  // The indices of the selected generated chords.
-  selectedGeneratedIndices() {
-    return this.selectedIn('generated').map(({ index }) => index);
+  selectedKeys() {
+    return [...this.selected];
   }
 
   get playX() {
@@ -182,49 +170,49 @@ export class Timeline {
     this.draw();
   }
 
-  // Rows from the top: ruler, custom chords, generated chords, chromagram, waveform.
+  // Rows from the top: ruler, chords, chromagram, waveform.
   layout() {
     const H = this.height;
-    const customTop = RULER_HEIGHT + 6;
-    const room = H - customTop - 8;
-    const rowHeight = Math.round(Math.min(70, Math.max(40, room * 0.2)));
-    const generatedTop = customTop + rowHeight + 6;
+    const chordsTop = RULER_HEIGHT + 6;
+    const room = H - chordsTop - 8;
+    const rowHeight = Math.round(Math.min(80, Math.max(44, room * 0.24)));
     const waveHeight = Math.round(Math.min(56, Math.max(28, room * 0.14)));
-    const chromaTop = generatedTop + rowHeight + 8;
-    const chromaHeight = Math.max(24, room - 2 * rowHeight - 6 - waveHeight - 16);
+    const chromaTop = chordsTop + rowHeight + 8;
+    const chromaHeight = Math.max(24, room - rowHeight - waveHeight - 16);
     const waveTop = chromaTop + chromaHeight + 8;
     return {
-      rows: { custom: { top: customTop, height: rowHeight }, generated: { top: generatedTop, height: rowHeight } },
+      chords: { top: chordsTop, height: rowHeight },
       chroma: { top: chromaTop, height: chromaHeight },
       wave: { top: waveTop, height: waveHeight },
     };
   }
 
-  rowAt(y) {
-    const { rows } = this.layout();
-    return Object.keys(rows).find((row) => y >= rows[row].top && y < rows[row].top + rows[row].height) ?? null;
+  onChords(y) {
+    const { chords } = this.layout();
+    return y >= chords.top && y < chords.top + chords.height;
   }
 
-  // The chord box under (x, y): { row, key, index, item }, or null.
+  // The chord sounding at `t`, or null.
+  chordAt(t) {
+    return this.data.chords[indexAt(this.data.chords, t, (c) => c.start)] ?? null;
+  }
+
+  // The chord box under (x, y), or null.
   boxAt(x, y) {
-    const row = this.rowAt(y);
-    if (!row || !this.data) return null;
-    const items = this.data[row];
-    const index = indexAt(items, this.xToTime(x), (c) => c.start);
-    const item = items[index];
-    if (!item || this.timeToX(item.end) < x) return null;
-    return { row, key: keyOf(row, item, index), index, item };
+    if (!this.data || !this.onChords(y)) return null;
+    const item = this.chordAt(this.xToTime(x));
+    return item && this.timeToX(item.end) >= x ? item : null;
   }
 
-  // A custom chord edge within reach of (x, y): { item, edge: 'start' | 'end' }, or null.
+  // The boundary between two chords within reach of (x, y): { left, right, from }, or null.
   edgeAt(x, y) {
-    if (this.rowAt(y) !== 'custom') return null;
+    if (!this.onChords(y)) return null;
+    const { chords } = this.data;
     let best = null;
-    for (const item of this.data.custom) {
-      for (const edge of ['start', 'end']) {
-        const distance = Math.abs(this.timeToX(item[edge]) - x);
-        if (distance <= EDGE_GRAB && (!best || distance < best.distance)) best = { item, edge, distance };
-      }
+    for (let i = Math.max(1, indexAt(chords, this.xToTime(x - EDGE_GRAB), (c) => c.start)); i < chords.length; i++) {
+      const distance = Math.abs(this.timeToX(chords[i].start) - x);
+      if (this.timeToX(chords[i].start) > x + EDGE_GRAB) break;
+      if (distance <= EDGE_GRAB && (!best || distance < best.distance)) best = { left: chords[i - 1], right: chords[i], from: chords[i].start, distance };
     }
     return best;
   }
@@ -236,20 +224,14 @@ export class Timeline {
     return { time: this.xToTime(x), pc: 11 - Math.floor(((y - chroma.top) * 12) / chroma.height) };
   }
 
-  // The custom chord sounding at `t`, or null.
-  customAt(t) {
-    return this.data.custom.find((c) => c.start <= t && t < c.end) ?? null;
-  }
-
-  // The selected chords of one row, as { key, index, item }.
-  selectedIn(row) {
-    return this.data[row].flatMap((item, index) => (this.selected.has(keyOf(row, item, index)) ? [{ index, item }] : []));
+  selectedItems() {
+    return this.data.chords.filter((c) => this.selected.has(c.key));
   }
 
   // Where dragged chords land, shifted by `dt` and with each edge snapped to the nearest beat.
   landing(items, dt) {
     return items
-      .map(({ index, item }) => ({ index, item, start: this.snap(item.start + dt), end: this.snap(item.end + dt) }))
+      .map((item) => ({ item, start: this.snap(item.start + dt), end: this.snap(item.end + dt) }))
       .filter((p) => p.end > p.start);
   }
 
@@ -280,7 +262,7 @@ export class Timeline {
         const box = this.boxAt(x, y);
         const additive = e.shiftKey || e.ctrlKey || e.metaKey;
         if (edge) {
-          this.gesture = { type: 'resize', ...edge, start: edge.item.start, end: edge.item.end };
+          this.gesture = { type: 'resize', ...edge, time: edge.from };
         } else if (box) {
           if (!this.selected.has(box.key) && !additive) this.selected.clear();
           const wasSelected = this.selected.has(box.key);
@@ -305,16 +287,16 @@ export class Timeline {
         if (g.type === 'pan' || g.moved) this.onSeek(g.time - (x - g.x) / this.pxPerSec);
       } else if (g.type === 'press') {
         if (Math.hypot(x - g.x, y - g.y) > DRAG_START) {
-          this.gesture = { type: 'drag', row: g.box.row, items: this.selectedIn(g.box.row), grabTime: g.grabTime, x, y };
+          this.gesture = { type: 'drag', items: this.selectedItems(), grabTime: g.grabTime, x, y };
         }
       } else if (g.type === 'drag') {
         Object.assign(g, { x, y });
       } else if (g.type === 'marquee') {
         Object.assign(g, { x1: x, y1: y });
       } else if (g.type === 'resize') {
+        // The boundary stays inside the two chords it separates.
         const t = e.shiftKey ? this.xToTime(x) : this.snap(this.xToTime(x));
-        if (g.edge === 'start') g.start = Math.max(0, Math.min(t, g.end - 0.05));
-        else g.end = Math.min(this.data.duration, Math.max(t, g.start + 0.05));
+        g.time = Math.max(g.left.start + 0.05, Math.min(t, g.right.end - 0.05));
       }
       this.draw();
     });
@@ -331,26 +313,21 @@ export class Timeline {
           if (g.wasSelected) this.selected.delete(g.box.key);
         } else this.selected = new Set([g.box.key]);
       } else if (g.type === 'marquee') {
-        // A click (no drag) on the chromagram with the custom timeline active edits that chord's notes
-        // (where there's none, the generated chord there is copied first).
-        const note = this.data.active === 'custom' && Math.hypot(x - g.x, y - g.y) <= DRAG_START ? this.noteAt(x, y) : null;
-        const over = (c) => c.root >= 0 && c.start <= note.time && note.time < c.end;
-        if (note && (this.customAt(note.time) || this.data.generated.some(over))) this.onEdit({ type: 'toggle', ...note });
+        // A click (no drag) on the chromagram edits the notes of the chord there.
+        const note = Math.hypot(x - g.x, y - g.y) <= DRAG_START ? this.noteAt(x, y) : null;
+        if (note && this.chordAt(note.time)) this.onEdit({ type: 'toggle', ...note });
         else this.finishMarquee(g);
-      }
-      else if (g.type === 'drag') this.finishDrag(g, y);
-      else if (g.type === 'resize') {
-        this.onEdit({ type: 'resize', id: g.item.id, start: g.start, end: g.end });
+      } else if (g.type === 'drag') this.finishDrag(g, y);
+      else if (g.type === 'resize' && Math.abs(g.time - g.from) > 1e-6) {
+        this.onEdit({ type: 'resize', left: g.left.key, right: g.right.key, from: g.from, time: g.time });
       }
       this.updateCursor(x, y);
       this.draw();
     });
-    // Double-clicking a generated chord copies it to the custom timeline (as Elevate does).
+    // Double-clicking a chord freezes or unfreezes it.
     canvas.addEventListener('dblclick', (e) => {
       const box = this.boxAt(e.offsetX, e.offsetY);
-      if (box?.row !== 'generated') return;
-      const ids = this.onEdit({ type: 'elevate', indices: [box.index] });
-      if (ids) this.select('custom', ids);
+      if (box) this.select(this.onEdit({ type: 'freeze', keys: [box.key] }));
     });
     canvas.addEventListener('pointercancel', () => {
       this.gesture = null;
@@ -378,39 +355,32 @@ export class Timeline {
     let cursor = 'default';
     if (y < RULER_HEIGHT || y >= wave.top) cursor = 'pointer';
     else if (this.edgeAt(x, y)) cursor = 'ew-resize';
-    else if (this.data.active === 'custom' && this.noteAt(x, y) && this.customAt(this.xToTime(x))) cursor = 'pointer';
+    else if (this.noteAt(x, y) && this.chordAt(this.xToTime(x))) cursor = 'pointer';
     else if (this.boxAt(x, y)) cursor = 'grab';
     this.canvas.style.cursor = cursor;
   }
 
-  // Selects the chords the marquee touches, in both chord rows.
+  // Selects the chords the marquee touches.
   finishMarquee(g) {
-    const { rows } = this.layout();
+    const { chords } = this.layout();
     if (!g.additive) this.selected.clear();
     const [left, right] = [Math.min(g.x, g.x1), Math.max(g.x, g.x1)];
     const [top, bottom] = [Math.min(g.y, g.y1), Math.max(g.y, g.y1)];
-    for (const row of ['custom', 'generated']) {
-      const r = rows[row];
-      if (bottom < r.top || top > r.top + r.height) continue;
-      this.data[row].forEach((item, index) => {
-        if (this.timeToX(item.end) >= left && this.timeToX(item.start) <= right) this.selected.add(keyOf(row, item, index));
-      });
+    if (bottom < chords.top || top > chords.top + chords.height) return;
+    for (const item of this.data.chords) {
+      if (this.timeToX(item.end) >= left && this.timeToX(item.start) <= right) this.selected.add(item.key);
     }
   }
 
-  // Drops dragged chords: generated ones dropped on the custom timeline are copied there; custom
-  // ones move within it, or are deleted when dropped outside it.
+  // Drops dragged chords: on the timeline they move there (frozen); off it, frozen ones are deleted
+  // (unfrozen).
   finishDrag(g, y) {
-    const onCustom = this.rowAt(y) === 'custom';
     const dt = this.xToTime(g.x) - g.grabTime;
-    if (g.row === 'generated') {
-      if (!onCustom) return;
-      const ids = this.onEdit({ type: 'place', items: this.landing(g.items, dt).map(({ index, start, end }) => ({ index, start, end })) });
-      if (ids) this.select('custom', ids);
-    } else if (onCustom) {
-      this.onEdit({ type: 'move', items: this.landing(g.items, dt).map(({ item, start, end }) => ({ id: item.id, start, end })) });
+    if (this.onChords(y)) {
+      const moved = this.landing(g.items, dt).map(({ item, start, end }) => ({ key: item.key, start, end }));
+      this.select(this.onEdit({ type: 'move', items: moved }));
     } else {
-      this.onEdit({ type: 'delete', ids: g.items.map(({ item }) => item.id) });
+      this.onEdit({ type: 'delete', keys: g.items.map((item) => item.key) });
     }
   }
 
@@ -427,10 +397,10 @@ export class Timeline {
       this.onSelect?.();
     }
 
-    const { duration, beats, bars, peaks, peaksPerSec, active } = this.data;
+    const { duration, beats, bars, peaks, peaksPerSec } = this.data;
     const t0 = this.xToTime(0);
     const t1 = this.xToTime(W);
-    const { rows, chroma, wave } = this.layout();
+    const { chords, chroma, wave } = this.layout();
 
     // Areas before the start / after the end of the song.
     ctx.fillStyle = COLORS.outside;
@@ -448,7 +418,7 @@ export class Timeline {
       const isBar = bars.pos[i] === 0;
       ctx.strokeStyle = isBar ? COLORS.bar : COLORS.beat;
       ctx.beginPath();
-      ctx.moveTo(x, isBar ? 4 : rows.custom.top);
+      ctx.moveTo(x, isBar ? 4 : chords.top);
       ctx.lineTo(x, H);
       ctx.stroke();
       if (isBar) {
@@ -457,8 +427,8 @@ export class Timeline {
       }
     }
 
-    for (const row of ['custom', 'generated']) this.drawRow(row, rows[row], t0, t1, row === active);
-    this.drawGesture(rows);
+    this.drawChords(chords, t0, t1);
+    this.drawGesture(chords);
 
     // Waveform overview.
     const mid = wave.top + wave.height / 2;
@@ -480,7 +450,7 @@ export class Timeline {
 
     // Dim what has already been played, then the playhead.
     ctx.fillStyle = COLORS.past;
-    for (const r of [rows.custom, rows.generated, chroma]) ctx.fillRect(0, r.top, this.playX, r.height);
+    for (const r of [chords, chroma]) ctx.fillRect(0, r.top, this.playX, r.height);
     ctx.fillStyle = COLORS.playhead;
     ctx.fillRect(this.playX - 1, 0, 2, H);
     ctx.beginPath();
@@ -490,62 +460,43 @@ export class Timeline {
     ctx.fill();
   }
 
-  // One chord timeline. The inactive one is drawn faded; the active one marks the sounding chord.
-  drawRow(row, { top, height }, t0, t1, isActive) {
+  // The chord timeline. Frozen chords have a thick white outline (yellow when selected); the others
+  // a thin one when sounding or selected.
+  drawChords({ top, height }, t0, t1) {
     const { ctx } = this;
-    const items = this.data[row];
+    const items = this.data.chords;
     const g = this.gesture;
-    ctx.globalAlpha = isActive ? 1 : 0.5;
-    if (row === 'custom' && !items.length) {
-      ctx.strokeStyle = COLORS.emptyRow;
-      ctx.setLineDash([6, 6]);
-      ctx.strokeRect(Math.max(0, this.timeToX(0)) + 0.5, top + 0.5, Math.min(this.width, this.timeToX(this.data.duration)) - Math.max(0, this.timeToX(0)) - 1, height - 1);
-      ctx.setLineDash([]);
-      ctx.fillStyle = COLORS.emptyRow;
-      ctx.font = '600 13px system-ui, sans-serif';
-      ctx.textAlign = 'center';
-      ctx.fillText('Drag chords here from the generated timeline', this.playX + (this.width - this.playX) / 2, top + height / 2);
-    }
     const current = indexAt(items, this.time, (c) => c.start);
     const first = Math.max(0, indexAt(items, t0, (c) => c.start));
     for (let i = first; i < items.length && items[i].start <= t1; i++) {
       let c = items[i];
-      // A chord being resized shows its new edges.
-      if (g?.type === 'resize' && row === 'custom' && g.item.id === c.id) c = { ...c, start: g.start, end: g.end };
+      // A boundary being dragged shows where it would go.
+      if (g?.type === 'resize' && g.left.key === c.key) c = { ...c, end: g.time };
+      if (g?.type === 'resize' && g.right.key === c.key) c = { ...c, start: g.time };
       const x0 = this.timeToX(c.start) + 1;
       const x1 = this.timeToX(c.end) - 1;
       if (x1 <= x0) continue;
-      const sounding = isActive && i === current && this.time < c.end;
-      const selected = this.selected.has(keyOf(row, c, i));
-      ctx.fillStyle = chordColor(c.root, c.quality, sounding);
+      const sounding = i === current && this.time < c.end;
+      const selected = this.selected.has(c.key);
+      ctx.fillStyle = chordColor(c.root, c.quality, sounding, c.frozen);
       ctx.beginPath();
       ctx.roundRect(x0, top, x1 - x0, height, 8);
       ctx.fill();
-      if (selected || sounding) {
-        ctx.strokeStyle = selected ? COLORS.selected : 'rgba(255,255,255,0.85)';
-        ctx.lineWidth = 2;
+      if (c.frozen || selected || sounding) {
+        ctx.save();
+        ctx.clip();
+        ctx.strokeStyle = selected ? COLORS.selected : c.frozen ? COLORS.frozen : 'rgba(255,255,255,0.85)';
+        // Inside the box, so neighbours' outlines don't overlap.
+        ctx.lineWidth = c.frozen ? 6 : 4;
         ctx.stroke();
-        ctx.lineWidth = 1;
+        ctx.restore();
       }
       this.drawLabel(c, x0, x1, top, height);
     }
-    // The row's name, marked when active.
-    const name = row === 'custom' ? 'CUSTOM' : 'GENERATED';
-    ctx.font = '700 9px system-ui, sans-serif';
-    const w = ctx.measureText(name).width + 10;
-    ctx.globalAlpha = 1;
-    ctx.fillStyle = isActive ? COLORS.selected : COLORS.rowTag;
-    ctx.beginPath();
-    ctx.roundRect(4, top + 4, w, 14, 4);
-    ctx.fill();
-    ctx.fillStyle = isActive ? '#1a1400' : 'rgba(255,255,255,0.6)';
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(name, 9, top + 11.5);
   }
 
   // The marquee, or the chords being dragged where they would land (red where a drop deletes).
-  drawGesture(rows) {
+  drawGesture(row) {
     const { ctx } = this;
     const g = this.gesture;
     if (g?.type === 'marquee') {
@@ -556,23 +507,24 @@ export class Timeline {
       ctx.strokeRect(x + 0.5, y + 0.5, Math.abs(g.x1 - g.x), Math.abs(g.y1 - g.y));
     }
     if (g?.type !== 'drag') return;
-    const onCustom = this.rowAt(g.y) === 'custom';
+    const onRow = this.onChords(g.y);
     const dt = this.xToTime(g.x) - g.grabTime;
-    const deleting = g.row === 'custom' && !onCustom;
-    const { top, height } = onCustom ? rows.custom : { top: g.y - rows.generated.height / 2, height: rows.generated.height };
-    const items = onCustom ? this.landing(g.items, dt) : g.items.map(({ item }) => ({ item, start: item.start + dt, end: item.end + dt }));
+    const { top, height } = onRow ? row : { top: g.y - row.height / 2, height: row.height };
+    const items = onRow ? this.landing(g.items, dt) : g.items.map((item) => ({ item, start: item.start + dt, end: item.end + dt }));
     ctx.globalAlpha = 0.75;
     for (const { item, start, end } of items) {
       const x0 = this.timeToX(start) + 1;
       const x1 = this.timeToX(end) - 1;
       if (x1 <= x0) continue;
-      ctx.fillStyle = chordColor(item.root, item.quality, false);
+      // Off the timeline, frozen chords would be deleted; the others wouldn't change.
+      const deleting = !onRow && item.frozen;
+      ctx.fillStyle = chordColor(item.root, item.quality, false, true);
       ctx.beginPath();
       ctx.roundRect(x0, top, x1 - x0, height, 8);
       ctx.fill();
       ctx.strokeStyle = deleting ? COLORS.remove : COLORS.selected;
       ctx.lineWidth = 2;
-      ctx.setLineDash(deleting ? [5, 4] : []);
+      ctx.setLineDash(deleting || onRow ? (deleting ? [5, 4] : []) : [2, 4]);
       ctx.stroke();
       ctx.setLineDash([]);
       ctx.lineWidth = 1;
@@ -581,7 +533,7 @@ export class Timeline {
     ctx.globalAlpha = 1;
   }
 
-  // The chromagram, the active chords' tones (yellow) and bass note (blue) over it, and the note
+  // The chromagram, the chords' tones (yellow) and bass note (blue) over it, and the note
   // names along the left edge.
   drawChroma(top, height, t0, t1) {
     const { ctx } = this;

@@ -92,10 +92,7 @@ const ui = {
   trDown: $('tr-down'),
   trUp: $('tr-up'),
   trValue: $('tr-value'),
-  activeGenerated: $('active-generated'),
-  activeCustom: $('active-custom'),
   rename: $('rename'),
-  elevate: $('elevate'),
   duration: $('duration'),
   overlay: $('overlay'),
   stage: $('stage'),
@@ -162,7 +159,6 @@ const view = {
   tempo: '0:1', // "<steady-tempo candidate index, or 'ai' for Beat This!>:<tempo multiplier>"
   halfBeat: false,
   transpose: 0,
-  active: 'generated', // the chord timeline the synths and highlights follow: 'generated' or 'custom'
 };
 
 let analysis = null; // worker output, independent of the settings; later also .tracked (Beat This!
@@ -200,7 +196,7 @@ const noteGraph = new NoteGraph($('note-graph'));
 const timeline = new Timeline($('timeline'), {
   onSeek: seek,
   onZoom: (pxPerSec) => (ui.zoom.value = pxPerSec),
-  onEdit: editCustom,
+  onEdit: editChords,
   onSelect: () => updateTools(),
 });
 
@@ -245,16 +241,16 @@ async function loadFile(file) {
     ui.title.textContent = file.name.replace(/\.[^.]+$/, '');
     ui.dropzone.hidden = true;
     ui.player.hidden = false;
-    custom = [];
+    frozen = [];
     undoStack = [];
     redoStack = [];
-    customKey = songHash = null;
+    frozenKey = songHash = null;
     ui.chartImport.disabled = false;
     ui.chartExport.disabled = true;
     refresh();
     seek(0);
     requestModels();
-    loadCustom(file, id);
+    loadFrozen(file, id);
   } catch (err) {
     console.error(err);
     ui.dropError.textContent = `Could not analyze “${file.name}”: ${err.message || err}`;
@@ -657,20 +653,19 @@ function refresh() {
         label: chordLabel(root, c.quality, shownKey, bass),
         voicing: chordVoicing(c.root, c.quality),
         tones: c.root < 0 ? [] : QUALITIES[c.quality].intervals.map((iv) => (c.root + iv) % 12),
-        chord: { root: c.root, quality: c.quality, bass: c.bass ?? -1 }, // as copied to the custom timeline
+        chord: { root: c.root, quality: c.quality, bass: c.bass ?? -1 }, // as frozen
       };
     }),
   });
-  buildCustom();
+  buildTrack();
+  ui.chartExport.disabled = false;
   ui.timing.querySelector('[value=auto]').text = `Auto (${free ? 'free' : 'on beats'})`;
   timeline.setData({
     duration,
     beats,
     bars,
-    generated: song.chords,
-    custom: customView.boxes,
-    active: view.active,
-    overlay: activeTrack(),
+    chords: track.chords,
+    overlay: track,
     chroma: { frameTimes: frames.frameTimes, values: frames.treble, names: noteNames(key) },
     peaks: analysis.peaks,
     peaksPerSec: analysis.peaksPerSec,
@@ -707,58 +702,62 @@ function mergeSameChord(pieces) {
   return out;
 }
 
-// ---------- Custom chord timeline ----------
+// ---------- Frozen chords ----------
 
-// The user's own chord chart: chords copied from the generated timeline, then moved, resized or
-// deleted. They keep their root, quality and bass whatever the settings; only their spelling follows
-// the key and Transpose. Saved per song, keyed by the file's SHA-256.
-let custom = []; // [{ id, start, end, root, quality, bass, notes? }], by start, not overlapping
-let nextCustomId = 1;
-let customKey = null; // where the current song's chart is saved
+// The main timeline shows the generated chords, which follow the settings, except where chords are
+// frozen: those keep their root, quality, bass and times whatever the settings (only their spelling
+// follows the key and Transpose). Editing a chord freezes it. Saved per song, keyed by the file's
+// SHA-256.
+let frozen = []; // [{ id, start, end, root, quality, bass, notes? }], by start, not overlapping
+let nextFrozenId = 1;
+let frozenKey = null; // where the current song's frozen chords are saved
 let songHash = null; // the current file's SHA-256 (hex), which identifies its chart
-let undoStack = []; // earlier versions of `custom`
+let undoStack = []; // earlier versions of `frozen`
 let redoStack = [];
-// The chart as shown: its boxes, the chords to play (gaps as N.C.) and the bass line.
-let customView = { boxes: [], chords: [], bass: [] };
+// The main timeline: the chords to show and play, and the bass line. Each chord has a selection
+// `key` ('f<id>' when frozen, 'g<index>@<start>' when not), `frozen`, and `chord`, its { root,
+// quality, bass, notes? } untransposed.
+let track = { chords: [], bass: [] };
 
-// The chords and bass line the synths, panels and highlights follow.
-const activeTrack = () => (view.active === 'custom' ? customView : song);
-
-function buildCustom() {
+function buildTrack() {
   const shownKey = transposeKey(key, view.transpose);
-  const gap = (start, end) => ({ start, end, root: -1, quality: 'N', bass: -1 });
-  const track = [];
-  let t = 0;
-  for (const c of custom) {
-    if (c.start > t + 1e-6) track.push(gap(t, c.start));
-    track.push(c);
-    t = c.end;
+  let unfrozen = song.chords.map((c, index) => ({ ...c, index }));
+  let bass = song.bass.map((b, i) => ({ ...b, end: song.bass[i + 1]?.start ?? analysis.duration }));
+  for (const c of frozen) {
+    unfrozen = carve(unfrozen, c.start, c.end);
+    bass = carve(bass, c.start, c.end);
   }
-  if (analysis && t < analysis.duration) track.push(gap(t, analysis.duration));
-  const chords = track.map((c) => {
-    const root = transposeRoot(c.root, view.transpose);
-    return {
-      ...c,
-      root,
-      label: chordLabel(root, c.quality, shownKey, transposeRoot(c.bass, view.transpose)),
-      voicing: c.notes ? notesVoicing(c.root, c.notes) : chordVoicing(c.root, c.quality),
-      tones: c.notes ?? (c.root < 0 ? [] : QUALITIES[c.quality].intervals.map((iv) => (c.root + iv) % 12)),
-    };
-  });
-  customView = {
-    boxes: chords.filter((c) => c.id !== undefined),
-    chords,
-    bass: track.map((c) => ({ start: c.start, pc: c.root < 0 ? -1 : c.bass >= 0 ? c.bass : c.root })),
-  };
+  const chords = [
+    ...unfrozen.filter((c) => c.end - c.start > 1e-3).map((c) => ({ ...c, key: `g${c.index}@${c.start.toFixed(3)}`, frozen: false })),
+    ...frozen.map((c) => {
+      const root = transposeRoot(c.root, view.transpose);
+      return {
+        ...c,
+        root,
+        key: `f${c.id}`,
+        frozen: true,
+        chord: c.notes ? { root: c.root, quality: c.quality, bass: c.bass, notes: c.notes } : { root: c.root, quality: c.quality, bass: c.bass },
+        label: chordLabel(root, c.quality, shownKey, transposeRoot(c.bass, view.transpose)),
+        voicing: c.notes ? notesVoicing(c.root, c.notes) : chordVoicing(c.root, c.quality),
+        tones: c.notes ?? (c.root < 0 ? [] : QUALITIES[c.quality].intervals.map((iv) => (c.root + iv) % 12)),
+      };
+    }),
+  ].sort((a, b) => a.start - b.start);
+  bass.push(...frozen.map((c) => ({ start: c.start, end: c.end, pc: c.root < 0 ? -1 : c.bass >= 0 ? c.bass : c.root })));
+  track = { chords, bass: bass.filter((b) => b.end - b.start > 1e-3).sort((a, b) => a.start - b.start) };
 }
 
-// Removes the span from..to from the chords in `list`, trimming or splitting those it overlaps.
+const trackItem = (key) => track.chords.find((c) => c.key === key);
+const trackAt = (t) => track.chords[indexAt(track.chords, t, (c) => c.start)];
+
+// Removes the span from..to from the items in `list`, trimming or splitting those it overlaps (the
+// second part of a split frozen chord gets a new id).
 function carve(list, from, to) {
   return list.flatMap((c) => {
     if (c.end <= from || c.start >= to) return [c];
     const parts = [];
     if (c.start < from) parts.push({ ...c, end: from });
-    if (c.end > to) parts.push({ ...c, id: c.start < from ? nextCustomId++ : c.id, start: to });
+    if (c.end > to) parts.push({ ...c, ...(c.start < from && c.id !== undefined ? { id: nextFrozenId++ } : {}), start: to });
     return parts;
   });
 }
@@ -769,86 +768,104 @@ function placeAll(list, items) {
   return [...list, ...items].sort((a, b) => a.start - b.start);
 }
 
-// Applies an edit from the timeline; returns the ids of newly placed chords.
-function editCustom(action) {
+// Freezes the unfrozen chords among `items` (track chords) as they are shown; returns the ids of
+// all of them, frozen.
+function freezeAsShown(items) {
+  return items.map((item) => {
+    if (item.frozen) return item.id;
+    const chord = { ...item.chord, id: nextFrozenId++, start: item.start, end: item.end };
+    frozen = placeAll(frozen, [chord]);
+    return chord.id;
+  });
+}
+
+// Applies an edit; chords are named by their track `keys`. Returns the keys of the chords it froze
+// or changed.
+function editChords(action) {
   if (!analysis) return;
-  const before = custom;
-  let ids;
-  if (action.type === 'elevate') {
-    const items = action.indices.map((i) => ({ ...song.chords[i].chord, id: nextCustomId++, ...elevatedSpan(song.chords[i]) }));
-    ids = items.map((c) => c.id);
-    custom = placeAll(custom, items);
+  const before = frozen;
+  const items = (action.keys ?? []).map(trackItem).filter(Boolean);
+  let ids = [];
+  if (action.type === 'freeze') {
+    // Toggles each chord: frozen ones unfreeze, the others freeze, as long as Duration says.
+    const thawed = new Set(items.filter((c) => c.frozen).map((c) => c.id));
+    const added = items.filter((c) => !c.frozen).map((c) => ({ ...c.chord, id: nextFrozenId++, ...frozenSpan(c) }));
+    frozen = placeAll(frozen.filter((c) => !thawed.has(c.id)), added);
+    ids = added.map((c) => c.id);
   } else if (action.type === 'place') {
-    // Generated chords (by index) or chords given as they are (pasted).
-    const items = action.items.map(({ index, start, end, chord }) => ({ ...(chord ?? song.chords[index].chord), id: nextCustomId++, start, end }));
-    ids = items.map((c) => c.id);
-    custom = placeAll(custom, items);
+    // Pasted chords: { start, end, chord }.
+    const added = action.items.map(({ start, end, chord }) => ({ ...chord, id: nextFrozenId++, start, end }));
+    frozen = placeAll(frozen, added);
+    ids = added.map((c) => c.id);
   } else if (action.type === 'move') {
-    const moves = new Map(action.items.map((m) => [m.id, m]));
-    const moved = custom.filter((c) => moves.has(c.id)).map((c) => ({ ...c, start: moves.get(c.id).start, end: moves.get(c.id).end }));
-    custom = placeAll(custom.filter((c) => !moves.has(c.id)), moved);
+    const moves = new Map();
+    for (const { key, start, end } of action.items) {
+      const item = trackItem(key);
+      if (item) moves.set(freezeAsShown([item])[0], { start, end });
+    }
+    const moved = frozen.filter((c) => moves.has(c.id)).map((c) => ({ ...c, ...moves.get(c.id) }));
+    frozen = placeAll(frozen.filter((c) => !moves.has(c.id)), moved);
+    ids = moved.map((c) => c.id);
   } else if (action.type === 'delete') {
-    const ids = new Set(action.ids);
-    custom = custom.filter((c) => !ids.has(c.id));
+    // Deleting a frozen chord unfreezes it: the generated chords show there again.
+    const gone = new Set(items.filter((c) => c.frozen).map((c) => c.id));
+    frozen = frozen.filter((c) => !gone.has(c.id));
   } else if (action.type === 'toggle') {
     // A note turned on or off from the chromagram; the chord is renamed from its new notes. Its
     // bass (the root, unless it's a slash chord) stays the bass, unless it was the note removed.
-    let chord = custom.find((c) => c.start <= action.time && action.time < c.end);
-    if (!chord) {
-      // Over a gap, the generated chord there is copied first (in the same edit).
-      const generated = song.chords.find((c) => c.chord.root >= 0 && c.start <= action.time && action.time < c.end);
-      if (!generated) return;
-      chord = { ...generated.chord, id: nextCustomId++, start: generated.start, end: generated.end };
-      custom = placeAll(custom, [chord]);
-    }
+    const item = trackAt(action.time);
+    if (!item) return;
+    ids = freezeAsShown([item]);
+    const chord = frozen.find((c) => c.id === ids[0]);
     const notes = new Set(notesOf(chord));
     if (notes.has(action.pc)) notes.delete(action.pc);
     else notes.add(action.pc);
     const bass = chord.bass >= 0 ? chord.bass : chord.root;
     const named = nameNotes([...notes], notes.has(bass) ? bass : -1, chord.root);
-    custom = custom.map((c) => (c === chord ? { ...c, ...named, notes: [...notes] } : c));
+    frozen = frozen.map((c) => (c === chord ? { ...c, ...named, notes: [...notes] } : c));
   } else if (action.type === 'rename') {
-    // Generated chords among them (by index) are copied to the custom timeline first.
     const { root, quality, bass, notes } = action;
-    const copies = (action.indices ?? []).map((i) => ({ id: nextCustomId++, ...elevatedSpan(song.chords[i]) }));
-    if (copies.length) custom = placeAll(custom, copies);
-    ids = [...action.ids, ...copies.map((c) => c.id)];
+    ids = freezeAsShown(items);
     const renamed = new Set(ids);
-    custom = custom.map((c) => (renamed.has(c.id) ? { ...c, root, quality, bass, notes } : c));
+    frozen = frozen.map((c) => (renamed.has(c.id) ? { ...c, root, quality, bass, notes } : c));
   } else if (action.type === 'resize') {
-    const chord = custom.find((c) => c.id === action.id);
-    if (!chord) return;
-    custom = placeAll(custom.filter((c) => c !== chord), [{ ...chord, start: action.start, end: action.end }]);
+    // The boundary between two neighbouring chords moved from `from` to `time`: the chord that
+    // grows freezes and takes the span over; the other one gives it up.
+    const grower = trackItem(action.time > action.from ? action.left : action.right);
+    if (!grower) return;
+    ids = freezeAsShown([grower]);
+    const chord = frozen.find((c) => c.id === ids[0]);
+    const resized = action.time > action.from ? { ...chord, end: action.time } : { ...chord, start: action.time };
+    frozen = placeAll(frozen.filter((c) => c !== chord), [resized]);
   }
-  if (custom === before) return ids;
+  if (frozen === before) return [];
   undoStack.push(before);
   if (undoStack.length > 200) undoStack.shift();
   redoStack = [];
-  customChanged();
-  return ids;
+  frozenChanged();
+  return ids.map((id) => `f${id}`);
 }
 
-function undoCustom(from, to) {
+function undoEdit(from, to) {
   if (!from.length) return;
-  to.push(custom);
-  custom = from.pop();
-  customChanged();
+  to.push(frozen);
+  frozen = from.pop();
+  frozenChanged();
 }
 
-function customChanged({ save = true } = {}) {
-  if (save) saveCustom();
-  ui.chartExport.disabled = !custom.length;
-  buildCustom();
-  timeline.setData({ custom: customView.boxes, overlay: activeTrack() });
+function frozenChanged({ save = true } = {}) {
+  if (save) saveFrozen();
+  buildTrack();
+  timeline.setData({ chords: track.chords, overlay: track });
   shown = {};
   resetSchedule();
 }
 
-// A custom chord's notes: as edited on the chromagram, else those its name implies. (The name alone
+// A frozen chord's notes: as edited on the chromagram, else those its name implies. (The name alone
 // can't tell: F-A-E is named Fmaj7, but has no C.)
 const notesOf = (c) => c.notes ?? chordNotes(c.root, c.quality, c.bass);
 
-// A custom chord as saved: with its notes, which also let a name the namer made up (C7(#11)) be
+// A frozen chord as saved: with its notes, which also let a name the namer made up (C7(#11)) be
 // rebuilt when its quality isn't known yet.
 const storedChord = (c) => ({ start: c.start, end: c.end, root: c.root, quality: c.quality, bass: c.bass, notes: notesOf(c) });
 
@@ -857,37 +874,37 @@ function restoredChord({ start, end, root, quality, bass, notes }) {
   return Array.isArray(notes) ? { start, end, root, quality, bass, notes } : { start, end, root, quality, bass };
 }
 
-function saveCustom() {
-  if (!customKey) return;
+function saveFrozen() {
+  if (!frozenKey) return;
   try {
-    if (custom.length) localStorage.setItem(customKey, JSON.stringify(custom.map(storedChord)));
-    else localStorage.removeItem(customKey);
+    if (frozen.length) localStorage.setItem(frozenKey, JSON.stringify(frozen.map(storedChord)));
+    else localStorage.removeItem(frozenKey);
   } catch {
     // not saved
   }
 }
 
-// Restores the chart saved for this file, if any.
-async function loadCustom(file, id) {
+// Restores the frozen chords saved for this file, if any.
+async function loadFrozen(file, id) {
   const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', await file.arrayBuffer()));
   if (id !== loadId) return;
   songHash = Array.from(hash, (b) => b.toString(16).padStart(2, '0')).join('');
-  customKey = `chord-er-custom:${songHash}`;
+  frozenKey = `chord-er-custom:${songHash}`;
   let saved = [];
   try {
-    saved = JSON.parse(localStorage.getItem(customKey)) ?? [];
+    saved = JSON.parse(localStorage.getItem(frozenKey)) ?? [];
   } catch {
     // nothing saved, or storage blocked
   }
-  if (!saved.length || custom.length) return;
-  custom = saved.map((c) => ({ ...restoredChord(c), id: nextCustomId++ }));
-  customChanged({ save: false });
+  if (!saved.length || frozen.length) return;
+  frozen = saved.map((c) => ({ ...restoredChord(c), id: nextFrozenId++ }));
+  frozenChanged({ save: false });
 }
 
 // ---------- Chart files ----------
 
-// A chart file: the custom chords with readable labels (untransposed, spelled for the detected
-// key), for the audio file with this SHA-256.
+// A chart file: every chord of the main timeline with readable labels (untransposed, spelled for
+// the detected key), for the audio file with this SHA-256.
 function exportChart() {
   const chart = {
     app: 'chord-er',
@@ -896,11 +913,11 @@ function exportChart() {
     sha256: songHash,
     duration: analysis.duration,
     key: keyLabel(key),
-    chords: custom.map((c) => ({
-      ...storedChord(c),
-      start: Number(c.start.toFixed(4)),
-      end: Number(c.end.toFixed(4)),
-      label: chordLabel(c.root, c.quality, key, c.bass),
+    chords: track.chords.map(({ start, end, chord }) => ({
+      ...storedChord({ ...chord, start, end }),
+      start: Number(start.toFixed(4)),
+      end: Number(end.toFixed(4)),
+      label: chordLabel(chord.root, chord.quality, key, chord.bass),
     })),
   };
   const url = URL.createObjectURL(new Blob([JSON.stringify(chart, null, 2)], { type: 'application/json' }));
@@ -909,7 +926,7 @@ function exportChart() {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-// Replaces the custom chart with the one in a chart file (undoable), and makes it active.
+// Replaces the frozen chords with the chart in a chart file, all frozen (undoable).
 async function importChart(file) {
   let chart;
   try {
@@ -932,28 +949,27 @@ async function importChart(file) {
     const made = chart.song ? `“${chart.song}”` : 'a different audio file';
     if (!confirm(`This chart was made for ${made}, not for the loaded file. Import it anyway?`)) return;
   }
-  const before = custom;
-  custom = placeAll([], chords.map((c) => ({ ...c, id: nextCustomId++ })));
+  const before = frozen;
+  frozen = placeAll([], chords.map((c) => ({ ...c, id: nextFrozenId++ })));
   undoStack.push(before);
   redoStack = [];
-  customChanged();
-  setActive('custom');
+  frozenChanged();
 }
 
-// ---------- Renaming custom chords ----------
+// ---------- Renaming chords ----------
 
-// While renaming, the Now panel's chord name is a text field for the selected chords. Selected
-// generated chords are copied to the custom timeline when the name is applied.
-let renaming = null; // { ids, indices, field }
+// While renaming, the Now panel's chord name is a text field for the chords being renamed, which
+// freeze when the name is applied.
+let renaming = null; // { keys, field }
 
 function startRename() {
-  const { ids, indices } = toolTargets();
-  if ((!ids.length && !indices.length) || renaming) return;
+  const keys = toolTargets();
+  if (!keys.length || renaming) return;
   const field = Object.assign(document.createElement('input'), { className: 'rename-field', spellcheck: false });
-  field.value = (ids.length ? customView.boxes.find((c) => c.id === ids[0])?.label : song.chords[indices[0]]?.label) ?? '';
+  field.value = trackItem(keys[0])?.label ?? '';
   ui.now.style.fontSize = ui.now.style.lineHeight = '';
   ui.now.replaceChildren(field);
-  renaming = { ids, indices, field };
+  renaming = { keys, field };
   field.addEventListener('keydown', (e) => {
     e.stopPropagation(); // typing isn't a shortcut
     if (e.key === 'Enter') finishRename(true);
@@ -969,7 +985,7 @@ function startRename() {
 // read keeps the field open, marked.
 function finishRename(apply) {
   if (!renaming) return;
-  const { ids, indices, field } = renaming;
+  const { keys, field } = renaming;
   if (apply) {
     const parsed = parseChordName(field.value);
     if (!parsed) {
@@ -984,8 +1000,10 @@ function finishRename(apply) {
     const notes = parsed.notes.map(untranspose);
     const named = root < 0 ? { root: -1, quality: 'N', bass: -1 } : nameNotes(notes, bass >= 0 ? bass : root, root);
     renaming = null;
-    const renamed = editCustom({ type: 'rename', ids, indices, ...named, notes });
-    if (indices.length && renamed) timeline.select('custom', renamed);
+    const wasSelected = timeline.selectedKeys().length > 0;
+    const renamed = editChords({ type: 'rename', keys, ...named, notes });
+    // Renamed chords that were selected stay selected (as frozen chords now).
+    if (wasSelected) timeline.select(renamed);
   }
   renaming = null;
   shown = {}; // the Now panel shows the playing chord again
@@ -993,41 +1011,29 @@ function finishRename(apply) {
 
 // ---------- Tools ----------
 
-// The chords a tool acts on: the selected ones, or else the one at the playhead (in the active
-// timeline; over a gap in the custom one, the generated chord there). { ids (custom), indices
-// (generated) }
+// The chords a tool acts on, as track keys: the selected ones, or else the one at the playhead.
 function toolTargets() {
-  const ids = timeline.selectedCustomIds();
-  const indices = timeline.selectedGeneratedIndices();
-  if (ids.length || indices.length || !song) return { ids, indices };
-  const t = audio.currentTime;
-  const here = view.active === 'custom' ? custom.find((c) => c.start <= t && t < c.end) : null;
-  if (here) return { ids: [here.id], indices: [] };
-  const index = generatedAt(t);
-  return { ids: [], indices: index >= 0 ? [index] : [] };
+  const keys = timeline.selectedKeys();
+  if (keys.length || !song) return keys;
+  const here = trackAt(audio.currentTime);
+  return here ? [here.key] : [];
 }
-
-// The generated chord (not N.C.) at `t`, as an index, or -1.
-const generatedAt = (t) => song.chords.findIndex((c) => c.root >= 0 && c.start <= t && t < c.end);
 
 // Greys out the tools with nothing to act on.
 function updateTools() {
-  ui.rename.disabled = !!renaming || !Object.values(toolTargets()).some((list) => list.length);
-  ui.elevate.disabled = !song || generatedAt(audio.currentTime) < 0;
+  ui.rename.disabled = !!renaming || !toolTargets().length;
 }
 
-// Elevate copies the generated chord at the playhead to the custom timeline, whatever is selected
-// or active.
-function elevate() {
-  if (!song) return;
-  const index = generatedAt(audio.currentTime);
-  if (index >= 0) editCustom({ type: 'elevate', indices: [index] });
+// F freezes the chord at the playhead, or unfreezes it.
+function toggleFreezeAtPlayhead() {
+  const here = song && trackAt(audio.currentTime);
+  if (here) editChords({ type: 'freeze', keys: [here.key] });
 }
 
-// Where a generated chord lands when copied up: its own times (Same), or as many beats as Duration
-// says, from the beat it starts on, moved back to where a chord that long belongs: the barline for
-// 4 and 8 beats, beat 1 or 3 for 2 beats, any beat for 1.
-function elevatedSpan(chord) {
+// Where a chord lands when frozen with F or a double click: its own times (Same), or as many beats
+// as Duration says, from the beat it starts on, moved back to where a chord that long belongs: the
+// barline for 4 and 8 beats, beat 1 or 3 for 2 beats, any beat for 1.
+function frozenSpan(chord) {
   if (prefs.duration === 'same') return { start: chord.start, end: chord.end };
   const beats = Number(prefs.duration);
   const { pos, length } = song.bars;
@@ -1056,20 +1062,17 @@ function setDuration(value) {
 let clipboard = [];
 
 function copyChords() {
-  const picked = [
-    ...custom.filter((c) => timeline.selectedCustomIds().includes(c.id)),
-    ...timeline.selectedGeneratedIndices().map((i) => ({ start: song.chords[i].start, end: song.chords[i].end, ...song.chords[i].chord })),
-  ].sort((a, b) => a.start - b.start);
+  const picked = timeline
+    .selectedKeys()
+    .map(trackItem)
+    .filter(Boolean)
+    .sort((a, b) => a.start - b.start);
   if (!picked.length) return;
-  clipboard = picked.map(({ start, end, root, quality, bass, notes }) => ({
-    offset: start - picked[0].start,
-    length: end - start,
-    chord: notes ? { root, quality, bass, notes } : { root, quality, bass },
-  }));
+  clipboard = picked.map(({ start, end, chord }) => ({ offset: start - picked[0].start, length: end - start, chord }));
 }
 
-// Pastes the copied chords at the playhead, snapped to the nearest beat (each edge on a beat), and
-// moves the playhead to their end.
+// Pastes the copied chords at the playhead, snapped to the nearest beat (each edge on a beat), frozen,
+// and moves the playhead to their end.
 function pasteChords() {
   if (!analysis || !clipboard.length) return;
   const at = timeline.snap(audio.currentTime);
@@ -1077,19 +1080,8 @@ function pasteChords() {
     .map(({ offset, length, chord }) => ({ chord, start: timeline.snap(at + offset), end: timeline.snap(at + offset + length) }))
     .filter((c) => c.end > c.start);
   if (!items.length) return;
-  const ids = editCustom({ type: 'place', items });
-  if (ids) timeline.select('custom', ids);
+  timeline.select(editChords({ type: 'place', items }));
   seek(Math.max(...items.map((c) => c.end)));
-}
-
-function setActive(row) {
-  view.active = row;
-  ui.activeGenerated.classList.toggle('on', row === 'generated');
-  ui.activeCustom.classList.toggle('on', row === 'custom');
-  if (!song) return;
-  timeline.setData({ active: row, overlay: activeTrack() });
-  shown = {};
-  resetSchedule();
 }
 
 // ---------- Mixer ----------
@@ -1208,7 +1200,7 @@ function showChord(el, label) {
 let shown = {};
 function updatePanel(t) {
   const { bars } = song;
-  const { chords } = activeTrack();
+  const { chords } = track;
   const ci = indexAt(chords, t, (c) => c.start);
   const beat = indexAt(grid.beats, t);
   const next = chords[ci + 1];
@@ -1292,7 +1284,7 @@ function schedule() {
 
   const { beats } = grid;
   const { bars } = song;
-  const { chords, bass } = activeTrack();
+  const { chords, bass } = track;
   const chordAt = (t) => chords[indexAt(chords, t, (c) => c.start)];
   const bassAt = (t) => bass[indexAt(bass, t, (b) => b.start)]?.pc ?? -1;
   if (scheduledUntil === null) {
@@ -1332,7 +1324,7 @@ function frame() {
     updatePanel(t);
     updateTools();
     schedule();
-    const { chords, bass } = activeTrack();
+    const { chords, bass } = track;
     noteGraph.update(t, chords[indexAt(chords, t, (c) => c.start)]?.tones, bass[indexAt(bass, t, (b) => b.start)]?.pc ?? -1);
   }
   requestAnimationFrame(frame);
@@ -1503,21 +1495,16 @@ ui.chartImport.addEventListener('change', () => {
   ui.chartImport.value = '';
 });
 ui.rename.addEventListener('click', startRename);
-ui.elevate.addEventListener('click', elevate);
 ui.duration.addEventListener('click', (e) => {
   if (e.target.dataset?.beats) setDuration(e.target.dataset.beats);
 });
 setDuration(DURATIONS.includes(prefs.duration) ? prefs.duration : 'same');
-ui.activeGenerated.addEventListener('click', () => setActive('generated'));
-ui.activeCustom.addEventListener('click', () => setActive('custom'));
 
 window.addEventListener('keydown', (e) => {
   const typing = e.target instanceof HTMLSelectElement || (e.target instanceof HTMLInputElement && !['range', 'checkbox'].includes(e.target.type));
   const ctrl = e.ctrlKey || e.metaKey;
-  if (!typing && !ctrl && !e.altKey && e.code === 'KeyA') {
-    setActive(view.active === 'custom' ? 'generated' : 'custom');
-  } else if (!typing && !ctrl && !e.altKey && e.code === 'KeyE') {
-    elevate();
+  if (!typing && !ctrl && !e.altKey && e.code === 'KeyF') {
+    toggleFreezeAtPlayhead();
   } else if (!typing && !ctrl && !e.altKey && e.code === 'KeyD') {
     setDuration(DURATIONS[(DURATIONS.indexOf(prefs.duration) + 1) % DURATIONS.length]);
   } else if (!typing && !ctrl && !e.altKey && e.code === 'KeyR') {
@@ -1531,17 +1518,17 @@ window.addEventListener('keydown', (e) => {
     pasteChords();
   } else if (!typing && (e.code === 'Delete' || e.code === 'Backspace')) {
     e.preventDefault();
-    const ids = timeline.selectedCustomIds();
-    if (ids.length) editCustom({ type: 'delete', ids });
+    const keys = timeline.selectedKeys();
+    if (keys.length) editChords({ type: 'delete', keys });
   } else if (e.code === 'Escape') {
     timeline.clearSelection();
   } else if (!typing && ctrl && e.code === 'KeyZ') {
     e.preventDefault();
-    if (e.shiftKey) undoCustom(redoStack, undoStack);
-    else undoCustom(undoStack, redoStack);
+    if (e.shiftKey) undoEdit(redoStack, undoStack);
+    else undoEdit(undoStack, redoStack);
   } else if (!typing && ctrl && e.code === 'KeyY') {
     e.preventDefault();
-    undoCustom(redoStack, undoStack);
+    undoEdit(redoStack, undoStack);
   } else if (e.code === 'Space') {
     if (e.target instanceof HTMLInputElement && e.target.type !== 'range' && e.target.type !== 'checkbox') return;
     e.preventDefault();
