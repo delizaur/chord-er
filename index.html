@@ -73,6 +73,17 @@
               <button id="play" class="button primary round" title="Play / pause (Space)">▶</button>
               <span id="time" class="time">0:00 / 0:00</span>
               <button id="rename" class="button small-text" disabled title="Rename the selected chord(s), or the one at the playhead: type a chord name and press Enter (R). Renamed chords freeze.">Rename</button>
+              <button id="freeze" class="button small-text" disabled title="Freeze the selected chord(s), or the one at the playhead, or unfreeze them (F: the one at the playhead)">Freeze</button>
+              <button id="spell" class="button small-text" disabled title="Listen to the selected duration (drag along the bar numbers to select one) and put the chord that fits it best there, frozen, with as many notes as Notes says (S)">Spell</button>
+              <span class="tool-label">Notes</span>
+              <div id="spell-notes" class="segmented compact" title="Notes: how many notes Spell gives its chord, from just the bass (1) up to 5.">
+                <button data-notes="1">1</button>
+                <button data-notes="2">2</button>
+                <button data-notes="3">3</button>
+                <button data-notes="4">4</button>
+                <button data-notes="5">5</button>
+              </div>
+              <span class="tool-label">Duration</span>
               <div id="duration" class="segmented compact" title="Duration: how many beats a chord gets when frozen with F or a double click; Same keeps its own times. Cycle with D.">
                 <button data-beats="1">1</button>
                 <button data-beats="2">2</button>

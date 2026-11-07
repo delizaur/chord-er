@@ -14,6 +14,7 @@ import {
   markPowerChords,
   mergeSimilar,
   nameNotes,
+  spellNotes,
   noteNames,
   parseChordLabel,
   parseChordName,
@@ -93,6 +94,9 @@ const ui = {
   trUp: $('tr-up'),
   trValue: $('tr-value'),
   rename: $('rename'),
+  freeze: $('freeze'),
+  spell: $('spell'),
+  spellNotes: $('spell-notes'),
   duration: $('duration'),
   overlay: $('overlay'),
   stage: $('stage'),
@@ -120,7 +124,8 @@ const DEFAULTS = {
   early: true, // start a chord where the bass already moved to it (Bb/D → Dm becomes an early Dm)
   rebuild: false, // experimental: re-read slash chords as in-key chords rooted on the bass
   merge: false, // merge neighbouring chords that differ only in quality (Bm, Bm7) into the best fit
-  duration: 'same', // beats a generated chord gets when copied up ('1', '2', '4', '8'), or its own length
+  duration: 'same', // beats a chord gets when frozen with F or a double click ('1', '2', '4', '8'), or its own times
+  spellNotes: 3, // how many notes Spell gives its chord (1 = just the bass, up to 5)
   mixer: {
     music: channel(100),
     click: channel(0),
@@ -583,7 +588,8 @@ function refresh() {
   const beatSource = index === 'ai' ? tracked : (tempoCandidates[Number(index)] ?? null);
   const { beats, downbeats } = buildBeats(beatSource, { mult: Number(multiplier), half: view.halfBeat }, duration);
   const frames = prefs.source === 'harmony' && analysis.harmony ? analysis.harmony : analysis;
-  grid = { duration, beats, downbeats, ...beatSync(beats, duration, frames, analysis.bassStem ?? frames) };
+  // The frame-level analyses are kept for Spell.
+  grid = { duration, beats, downbeats, frames, bassFrames: analysis.bassStem ?? frames, ...beatSync(beats, duration, frames, analysis.bassStem ?? frames) };
   key ??= detectKey(grid);
 
   // The beat grid always gives the bars; the chords come from it too, or, with free timing, from
@@ -1021,13 +1027,40 @@ function toolTargets() {
 
 // Greys out the tools with nothing to act on.
 function updateTools() {
-  ui.rename.disabled = !!renaming || !toolTargets().length;
+  const targets = toolTargets().length;
+  ui.rename.disabled = !!renaming || !targets;
+  ui.freeze.disabled = !targets;
+  ui.spell.disabled = !song || !timeline.range;
 }
 
 // F freezes the chord at the playhead, or unfreezes it.
 function toggleFreezeAtPlayhead() {
   const here = song && trackAt(audio.currentTime);
   if (here) editChords({ type: 'freeze', keys: [here.key] });
+}
+
+// The Freeze button freezes or unfreezes the selected chords, or the one at the playhead.
+function toggleFreeze() {
+  const keys = toolTargets();
+  if (!keys.length) return;
+  const frozenKeys = editChords({ type: 'freeze', keys });
+  if (timeline.selectedKeys().length) timeline.select(frozenKeys);
+}
+
+// Spell listens to the selected duration and puts the chord heard there, with Notes notes, over
+// it, frozen (replacing the chords there).
+function spell() {
+  const range = timeline.range;
+  if (!song || !range) return;
+  const { notes, bass } = spellNotes(grid.frames, grid.bassFrames, range.start, range.end, prefs.spellNotes);
+  const chord = notes.length ? { ...nameNotes(notes, bass, bass), notes } : { root: -1, quality: 'N', bass: -1 };
+  timeline.select(editChords({ type: 'place', items: [{ start: range.start, end: range.end, chord }] }));
+}
+
+function setSpellNotes(value) {
+  prefs.spellNotes = value;
+  savePrefs();
+  for (const button of ui.spellNotes.querySelectorAll('button')) button.classList.toggle('on', Number(button.dataset.notes) === value);
 }
 
 // Where a chord lands when frozen with F or a double click: its own times (Same), or as many beats
@@ -1495,6 +1528,12 @@ ui.chartImport.addEventListener('change', () => {
   ui.chartImport.value = '';
 });
 ui.rename.addEventListener('click', startRename);
+ui.freeze.addEventListener('click', toggleFreeze);
+ui.spell.addEventListener('click', spell);
+ui.spellNotes.addEventListener('click', (e) => {
+  if (e.target.dataset?.notes) setSpellNotes(Number(e.target.dataset.notes));
+});
+setSpellNotes(Math.max(1, Math.min(5, Math.round(prefs.spellNotes) || 3)));
 ui.duration.addEventListener('click', (e) => {
   if (e.target.dataset?.beats) setDuration(e.target.dataset.beats);
 });
@@ -1505,6 +1544,8 @@ window.addEventListener('keydown', (e) => {
   const ctrl = e.ctrlKey || e.metaKey;
   if (!typing && !ctrl && !e.altKey && e.code === 'KeyF') {
     toggleFreezeAtPlayhead();
+  } else if (!typing && !ctrl && !e.altKey && e.code === 'KeyS') {
+    spell();
   } else if (!typing && !ctrl && !e.altKey && e.code === 'KeyD') {
     setDuration(DURATIONS[(DURATIONS.indexOf(prefs.duration) + 1) % DURATIONS.length]);
   } else if (!typing && !ctrl && !e.altKey && e.code === 'KeyR') {

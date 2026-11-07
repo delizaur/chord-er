@@ -18,6 +18,8 @@ const COLORS = {
   text: '#ffffff',
   selected: '#ffcc4d',
   marquee: 'rgba(255,204,77,0.12)',
+  range: 'rgba(255,204,77,0.08)',
+  rangeRuler: 'rgba(255,204,77,0.35)',
   remove: '#e05a5a',
   frozen: '#ffffff',
   chromaRule: 'rgba(255,255,255,0.05)',
@@ -90,6 +92,7 @@ export class Timeline {
     this.time = 0;
     this.data = null;
     this.selected = new Set();
+    this.range = null; // the selected duration, { start, end }, chosen on the ruler
     this.gesture = null;
     this.width = 0;
     this.height = 0;
@@ -129,8 +132,10 @@ export class Timeline {
     this.draw();
   }
 
+  // Clears the selected chords and the selected duration.
   clearSelection() {
     this.selected.clear();
+    this.range = null;
     this.draw();
   }
 
@@ -253,8 +258,14 @@ export class Timeline {
       if (e.button === 1) {
         this.gesture = { type: 'pan', x, time: this.time };
       } else if (e.button === 0) {
-        if (y < RULER_HEIGHT || y >= wave.top) {
-          // The ruler and the waveform seek: click to jump, drag to scrub.
+        if (y < RULER_HEIGHT) {
+          // The ruler selects a duration, from beat to beat; a click (no drag) seeks there.
+          const at = this.snap(this.xToTime(x));
+          this.gesture = { type: 'range', x, from: at, to: at, moved: false };
+          return;
+        }
+        if (y >= wave.top) {
+          // The waveform seeks: click to jump, drag to scrub.
           this.gesture = { type: 'seek', x, time: this.time, moved: false };
           return;
         }
@@ -285,6 +296,9 @@ export class Timeline {
       if (g.type === 'pan' || g.type === 'seek') {
         if (Math.abs(x - g.x) > DRAG_START) g.moved = true;
         if (g.type === 'pan' || g.moved) this.onSeek(g.time - (x - g.x) / this.pxPerSec);
+      } else if (g.type === 'range') {
+        if (Math.abs(x - g.x) > DRAG_START) g.moved = true;
+        g.to = this.snap(this.xToTime(x));
       } else if (g.type === 'press') {
         if (Math.hypot(x - g.x, y - g.y) > DRAG_START) {
           this.gesture = { type: 'drag', items: this.selectedItems(), grabTime: g.grabTime, x, y };
@@ -307,6 +321,7 @@ export class Timeline {
       if (!g) return;
       const { offsetX: x, offsetY: y } = e;
       if (g.type === 'seek' && !g.moved) this.onSeek(this.xToTime(x));
+      else if (g.type === 'range') this.finishRange(g, x);
       else if (g.type === 'press') {
         // A click on a chord selects just it; with Shift/Ctrl it toggles it in the selection.
         if (g.additive) {
@@ -353,11 +368,25 @@ export class Timeline {
     if (!this.data) return;
     const { wave } = this.layout();
     let cursor = 'default';
-    if (y < RULER_HEIGHT || y >= wave.top) cursor = 'pointer';
+    if (y < RULER_HEIGHT) cursor = 'text';
+    else if (y >= wave.top) cursor = 'pointer';
     else if (this.edgeAt(x, y)) cursor = 'ew-resize';
     else if (this.noteAt(x, y) && this.chordAt(this.xToTime(x))) cursor = 'pointer';
     else if (this.boxAt(x, y)) cursor = 'grab';
     this.canvas.style.cursor = cursor;
+  }
+
+  // Selects the dragged duration and the chords inside it, or for a click, clears it and seeks.
+  finishRange(g, x) {
+    const [start, end] = [Math.min(g.from, g.to), Math.max(g.from, g.to)];
+    if (!g.moved || end - start < 0.05) {
+      this.range = null;
+      this.onSeek(this.xToTime(x));
+      return;
+    }
+    this.range = { start, end };
+    const inside = this.data.chords.filter((c) => c.start >= start - 0.02 && c.end <= end + 0.02);
+    this.selected = new Set(inside.map((c) => c.key));
   }
 
   // Selects the chords the marquee touches.
@@ -429,6 +458,7 @@ export class Timeline {
 
     this.drawChords(chords, t0, t1);
     this.drawGesture(chords);
+    this.drawRange(H);
 
     // Waveform overview.
     const mid = wave.top + wave.height / 2;
@@ -493,6 +523,23 @@ export class Timeline {
       }
       this.drawLabel(c, x0, x1, top, height);
     }
+  }
+
+  // The selected duration (or the one being dragged on the ruler), shaded down the whole timeline.
+  drawRange(H) {
+    const { ctx } = this;
+    const g = this.gesture;
+    const range = g?.type === 'range' && g.moved ? { start: Math.min(g.from, g.to), end: Math.max(g.from, g.to) } : this.range;
+    if (!range) return;
+    const x0 = this.timeToX(range.start);
+    const x1 = this.timeToX(range.end);
+    ctx.fillStyle = COLORS.range;
+    ctx.fillRect(x0, 0, x1 - x0, H);
+    ctx.fillStyle = COLORS.rangeRuler;
+    ctx.fillRect(x0, 0, x1 - x0, RULER_HEIGHT);
+    ctx.fillStyle = COLORS.selected;
+    ctx.fillRect(Math.round(x0) - 1, 0, 2, H);
+    ctx.fillRect(Math.round(x1) - 1, 0, 2, H);
   }
 
   // The marquee, or the chords being dragged where they would land (red where a drop deletes).

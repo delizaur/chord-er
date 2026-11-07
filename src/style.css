@@ -439,6 +439,12 @@ body.dragging .timeline-wrap {
   border-left: 1px solid var(--border);
 }
 
+.tool-label {
+  margin-left: 6px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .segmented.compact button {
   padding: 6px 9px;
 }

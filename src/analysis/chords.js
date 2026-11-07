@@ -707,6 +707,30 @@ const pcSet = (intervals) => new Set(intervals.map(mod12));
 // over wins (an exact match has none); then the bass as root (no slash), then a type with its 5th
 // over one without, then `preferRoot` (so adding A to a C chord gives C6, not Am7/C), then the
 // simpler type. Notes left over are added to the name, as in C7(#11).
+// The chord heard from `start` to `end` (seconds) as `count` notes: the bass note (the strongest
+// bass-note salience) and the count − 1 strongest other pitch classes of the chroma. `frames` and
+// `bassFrames` are frame-level analyses (computeChroma). Returns { notes, bass }; bass -1 and no
+// notes when nothing sounds.
+export function spellNotes(frames, bassFrames, start, end, count) {
+  const total = ({ frameTimes }, data) => {
+    const sum = new Float64Array(12);
+    for (let f = Math.max(0, indexAt(frameTimes, start)); f < frameTimes.length && frameTimes[f] < end; f++) {
+      if (frameTimes[f] < start) continue;
+      for (let c = 0; c < 12; c++) sum[c] += data[f * 12 + c];
+    }
+    return sum;
+  };
+  const chroma = total(frames, frames.treble);
+  const bassLevels = total(bassFrames, bassFrames.bassSalience);
+  if (!Math.max(...bassLevels)) return { notes: [], bass: -1 };
+  const bass = bassLevels.indexOf(Math.max(...bassLevels));
+  const others = [...Array(12).keys()]
+    .filter((pc) => pc !== bass && chroma[pc] > 0)
+    .sort((a, b) => chroma[b] - chroma[a])
+    .slice(0, count - 1);
+  return { notes: [bass, ...others], bass };
+}
+
 export function nameNotes(notes, bass = -1, preferRoot = -1) {
   const set = new Set(notes.map(mod12));
   if (bass >= 0) set.add(bass);
